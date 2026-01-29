@@ -1,15 +1,16 @@
 import ollama
 import chromadb
-from mem0 import Memory
 import json
 import uuid
-import sys
+import re
+import os
 from datetime import datetime
 
 USER_ID = "raghav"
 MODEL = "qwen3:1.7b"
 MAX_MESSAGES = 16
 SUMMARIZE_THRESHOLD = 20
+MEMORY_FILE = "./user_memories.json"
 
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
 
@@ -18,83 +19,64 @@ try:
 except:
     knowledge_collection = chroma_client.create_collection(name="knowledge_base")
 
-mem0_config = {
-    "llm": {
-        "provider": "ollama",
-        "config": {
-            "model": MODEL,
-            "temperature": 0.7,
-            "max_tokens": 4000,
-        }
-    },
-    "embedder": {
-        "provider": "ollama",
-        "config": {
-            "model": "nomic-embed-text"
-        }
-    },
-    "vector_store": {
-        "provider": "chroma",
-        "config": {
-            "collection_name": "mem0_memories",
-            "path": "./mem0_db"
-        }
-    }
-}
+USER_MEMORIES = []
 
-memory = Memory.from_config(mem0_config)
+def load_memories_from_disk():
+    global USER_MEMORIES
+    if os.path.exists(MEMORY_FILE):
+        with open(MEMORY_FILE, "r") as f:
+            USER_MEMORIES = json.load(f)
+    else:
+        USER_MEMORIES = []
+    return USER_MEMORIES
+
+def save_memories_to_disk():
+    with open(MEMORY_FILE, "w") as f:
+        json.dump(USER_MEMORIES, f, indent=2)
+
+def add_memory(content):
+    global USER_MEMORIES
+    content = content.strip()
+    for existing in USER_MEMORIES:
+        if content.lower() in existing.lower() or existing.lower() in content.lower():
+            return False
+    USER_MEMORIES.append(content)
+    save_memories_to_disk()
+    return True
+
+def get_all_memories():
+    return USER_MEMORIES
+
+def clear_memories():
+    global USER_MEMORIES
+    USER_MEMORIES = []
+    save_memories_to_disk()
 
 tools = [
     {
         "type": "function",
         "function": {
-            "name": "add_user_memory",
-            "description": "Add a personal memory or fact about the user (preferences, personal info, habits, relationships, etc)",
+            "name": "remember",
+            "description": "Store a fact about the user",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": "The memory or fact to store about the user"
-                    }
+                    "fact": {"type": "string", "description": "The fact to remember"}
                 },
-                "required": ["content"]
+                "required": ["fact"]
             }
         }
     },
     {
         "type": "function",
         "function": {
-            "name": "get_user_memories",
-            "description": "Retrieve relevant memories about the user based on a query",
+            "name": "save_note",
+            "description": "Save information to knowledge base",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Query to search for relevant user memories"
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "add_to_knowledge_base",
-            "description": "Store information in the knowledge base (projects, research, notes, news, things being worked on)",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": "The information to store"
-                    },
-                    "topic": {
-                        "type": "string",
-                        "description": "Topic or category for this information"
-                    }
+                    "content": {"type": "string", "description": "The information"},
+                    "topic": {"type": "string", "description": "Topic category"}
                 },
                 "required": ["content", "topic"]
             }
@@ -103,15 +85,12 @@ tools = [
     {
         "type": "function",
         "function": {
-            "name": "search_knowledge_base",
-            "description": "Search the knowledge base for relevant context and information",
+            "name": "search_notes",
+            "description": "Search the knowledge base",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Query to search the knowledge base"
-                    }
+                    "query": {"type": "string", "description": "Search query"}
                 },
                 "required": ["query"]
             }
@@ -121,40 +100,17 @@ tools = [
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Search the web for current information, news, or facts",
+            "description": "Search the internet",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query"
-                    }
+                    "query": {"type": "string", "description": "Search query"}
                 },
                 "required": ["query"]
             }
         }
     }
 ]
-
-def add_user_memory(content):
-    memory.add(content, user_id=USER_ID)
-    return f"Memory stored: {content}"
-
-def get_user_memories(query):
-    results = memory.search(query, user_id=USER_ID)
-    if not results or len(results) == 0:
-        return "No relevant memories found."
-    memories = []
-    for r in results:
-        if isinstance(r, dict) and "memory" in r:
-            memories.append(r["memory"])
-        elif isinstance(r, dict) and "text" in r:
-            memories.append(r["text"])
-        elif isinstance(r, str):
-            memories.append(r)
-    if not memories:
-        return "No relevant memories found."
-    return "User memories: " + " | ".join(memories)
 
 def add_to_knowledge_base(content, topic):
     doc_id = str(uuid.uuid4())
@@ -163,7 +119,7 @@ def add_to_knowledge_base(content, topic):
         documents=[content],
         metadatas=[{"topic": topic, "timestamp": datetime.now().isoformat()}]
     )
-    return f"Added to knowledge base under topic '{topic}'"
+    return f"Saved to knowledge base"
 
 def search_knowledge_base(query):
     try:
@@ -172,57 +128,115 @@ def search_knowledge_base(query):
             return "Knowledge base is empty."
         results = knowledge_collection.query(query_texts=[query], n_results=min(5, count))
         if not results or not results.get("documents") or not results["documents"][0]:
-            return "No relevant information found in knowledge base."
-        docs = results["documents"][0]
-        return "Knowledge base results: " + " | ".join(docs)
+            return "No results found."
+        return " | ".join(results["documents"][0])
     except Exception as e:
-        return f"Knowledge base search failed: {str(e)}"
+        return f"Search failed: {str(e)}"
 
 def web_search(query):
     try:
-        response = ollama.chat(
-            model=MODEL,
-            messages=[{"role": "user", "content": f"/no_think Search the web and answer: {query}"}],
-            options={"num_predict": 300}
-        )
-        content = response["message"]["content"]
-        if "<think>" in content:
-            content = content.split("</think>")[-1].strip()
-        return f"Web search results for '{query}': {content}"
+        import urllib.request
+        import urllib.parse
+        import html as html_module
+        url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"})
+        with urllib.request.urlopen(req, timeout=15) as response:
+            html = response.read().decode("utf-8")
+
+        results = []
+        titles = re.findall(r'class="result__a"[^>]*>([^<]+)</a>', html)
+        snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)
+
+        for i in range(min(5, len(titles), len(snippets))):
+            title = html_module.unescape(titles[i].strip())
+            snippet = re.sub(r'<[^>]+>', '', snippets[i])
+            snippet = html_module.unescape(snippet.strip())
+            if title and snippet:
+                results.append(f"**{title}**: {snippet}")
+
+        if results:
+            formatted = "\n".join(results)
+            add_to_knowledge_base(f"Web search for '{query}':\n{formatted}", "web_search")
+            return formatted
+        return "No results found"
     except Exception as e:
-        return f"Web search failed: {str(e)}"
+        return f"Search failed: {str(e)}"
 
 def execute_tool(tool_name, arguments):
-    if tool_name == "add_user_memory":
-        return add_user_memory(arguments["content"])
-    elif tool_name == "get_user_memories":
-        return get_user_memories(arguments["query"])
-    elif tool_name == "add_to_knowledge_base":
+    if tool_name == "remember":
+        if add_memory(arguments["fact"]):
+            return f"Remembered: {arguments['fact']}"
+        return "Already known"
+    elif tool_name == "save_note":
         return add_to_knowledge_base(arguments["content"], arguments["topic"])
-    elif tool_name == "search_knowledge_base":
+    elif tool_name == "search_notes":
         return search_knowledge_base(arguments["query"])
     elif tool_name == "web_search":
         return web_search(arguments["query"])
     return "Unknown tool"
 
-def get_memory_context(query):
-    try:
-        results = memory.search(query, user_id=USER_ID)
-        if not results or len(results) == 0:
-            return ""
-        memories = []
-        for r in results[:3]:
-            if isinstance(r, dict) and "memory" in r:
-                memories.append(r["memory"])
-            elif isinstance(r, dict) and "text" in r:
-                memories.append(r["text"])
-            elif isinstance(r, str):
-                memories.append(r)
-        if memories:
-            return "User context: " + " | ".join(memories)
-        return ""
-    except:
-        return ""
+def auto_extract_memories(text):
+    text_lower = text.lower()
+    patterns = [
+        (r"(?:my name is|i'm|i am|call me) (\w+)", "User's name is {}"),
+        (r"i(?:'m| am) (\d+)(?: years old)?", "User is {} years old"),
+        (r"i live in ([^,.!?]+)", "User lives in {}"),
+        (r"i work (?:at|for) ([^,.!?]+)", "User works at {}"),
+        (r"i(?:'m| am) a ([^,.!?]+?)(?:\.|,|!|\?|$)", "User is a {}"),
+        (r"my job is ([^,.!?]+)", "User's job is {}"),
+        (r"i like ([^,.!?]+)", "User likes {}"),
+        (r"i love ([^,.!?]+)", "User loves {}"),
+        (r"i hate ([^,.!?]+)", "User hates {}"),
+        (r"my favorite (\w+) is ([^,.!?]+)", "User's favorite {} is {}"),
+        (r"i(?:'m| am) from ([^,.!?]+)", "User is from {}"),
+        (r"i speak ([^,.!?]+)", "User speaks {}"),
+        (r"my birthday is ([^,.!?]+)", "User's birthday is {}"),
+        (r"i(?:'m| am) studying ([^,.!?]+)", "User is studying {}"),
+        (r"i study ([^,.!?]+)", "User studies {}"),
+        (r"i go to ([^,.!?]+)", "User goes to {}"),
+        (r"i have (?:a |an )?([^,.!?]+)", "User has {}"),
+    ]
+
+    extracted = []
+    for pattern, template in patterns:
+        matches = re.findall(pattern, text_lower)
+        for match in matches:
+            if isinstance(match, tuple):
+                mem = template.format(*[m.strip() for m in match])
+            else:
+                mem = template.format(match.strip())
+            if len(mem) > 10 and len(mem) < 100:
+                extracted.append(mem)
+    return extracted
+
+def auto_extract_knowledge(text):
+    text_lower = text.lower()
+    patterns = [
+        (r"i(?:'m| am) working on ([^,.!?]+)", "projects"),
+        (r"i(?:'m| am) building ([^,.!?]+)", "projects"),
+        (r"i(?:'m| am) learning ([^,.!?]+)", "learning"),
+        (r"i(?:'m| am) reading ([^,.!?]+)", "reading"),
+    ]
+
+    extracted = []
+    for pattern, topic in patterns:
+        matches = re.findall(pattern, text_lower)
+        for match in matches:
+            content = f"User is working on: {match.strip()}"
+            if len(content) > 10:
+                extracted.append((content, topic))
+    return extracted
+
+def process_user_input(text):
+    memories = auto_extract_memories(text)
+    for mem in memories:
+        if add_memory(mem):
+            print(f"[REMEMBERED] {mem}")
+
+    knowledge = auto_extract_knowledge(text)
+    for content, topic in knowledge:
+        add_to_knowledge_base(content, topic)
+        print(f"[SAVED] {content}")
 
 def get_knowledge_context(query):
     try:
@@ -231,141 +245,120 @@ def get_knowledge_context(query):
             return ""
         results = knowledge_collection.query(query_texts=[query], n_results=min(3, count))
         if results and results.get("documents") and results["documents"][0]:
-            return "Relevant knowledge: " + " | ".join(results["documents"][0])
+            return "Recent notes: " + " | ".join(results["documents"][0])
         return ""
     except:
         return ""
 
-def is_complex_query(text):
-    complex_keywords = ["why", "how", "explain", "analyze", "compare", "difference", "should", "best", "recommend", "think about", "help me understand", "what if", "plan", "strategy"]
-    text_lower = text.lower()
-    return any(kw in text_lower for kw in complex_keywords)
-
-def estimate_tokens(messages):
-    total = 0
-    for msg in messages:
-        total += len(msg.get("content", "")) // 4
-    return total
-
 def summarize_conversation(messages):
     if len(messages) < 4:
         return None
-    conversation_text = ""
-    for msg in messages:
-        role = msg["role"]
-        content = msg.get("content", "")
-        if role == "user":
-            conversation_text += f"User: {content}\n"
-        elif role == "assistant":
-            conversation_text += f"Assistant: {content}\n"
-
+    text = "\n".join([f"{m['role']}: {m.get('content', '')}" for m in messages])
     try:
         response = ollama.chat(
             model=MODEL,
-            messages=[{
-                "role": "user",
-                "content": f"/no_think Summarize this conversation in 2-3 sentences, capturing key topics, decisions, and any important information about the user:\n\n{conversation_text}"
-            }],
-            options={"num_predict": 200}
+            messages=[{"role": "user", "content": f"/no_think Summarize in 2 sentences:\n{text}"}],
+            options={"num_predict": 100}
         )
         summary = response["message"]["content"]
-        if "<think>" in summary:
-            summary = summary.split("</think>")[-1].strip()
-        return summary
+        if "</think>" in summary:
+            summary = summary.split("</think>")[-1]
+        return summary.strip()
     except:
         return None
 
 def manage_context(conversation):
     if len(conversation) < SUMMARIZE_THRESHOLD:
         return conversation
-
-    print("\n[CONTEXT] Summarizing old conversation...")
-    messages_to_summarize = conversation[:-MAX_MESSAGES]
-    messages_to_keep = conversation[-MAX_MESSAGES:]
-
-    summary = summarize_conversation(messages_to_summarize)
+    print("\n[CONTEXT] Compressing conversation...")
+    old = conversation[:-MAX_MESSAGES]
+    keep = conversation[-MAX_MESSAGES:]
+    summary = summarize_conversation(old)
     if summary:
-        add_to_knowledge_base(
-            f"Conversation summary: {summary}",
-            "conversation_history"
-        )
-        print(f"[CONTEXT] Saved summary to knowledge base")
+        add_to_knowledge_base(f"Conversation: {summary}", "history")
+    return keep
 
-    print(f"[CONTEXT] Keeping last {len(messages_to_keep)} messages")
-    return messages_to_keep
-
-def stream_response(full_messages, use_thinking):
+def stream_chat(messages):
     print("\nMenzi: ", end="", flush=True)
 
     full_response = ""
-    in_think_block = False
-    showed_thinking = False
+    in_think = False
+    buffer = ""
 
     stream = ollama.chat(
         model=MODEL,
-        messages=full_messages,
+        messages=messages,
         stream=True,
-        options={"num_predict": 1000}
+        options={"num_predict": 800}
     )
 
-    buffer = ""
     for chunk in stream:
         token = chunk["message"]["content"]
         buffer += token
         full_response += token
 
         while True:
-            if not in_think_block:
+            if not in_think:
                 if "<think>" in buffer:
-                    pre_think = buffer.split("<think>")[0]
-                    if pre_think:
-                        print(pre_think, end="", flush=True)
-                    if not showed_thinking:
-                        print("[thinking...]", end="", flush=True)
-                        showed_thinking = True
+                    pre = buffer.split("<think>")[0]
+                    print(pre, end="", flush=True)
+                    print("[thinking...", end="", flush=True)
                     buffer = buffer.split("<think>", 1)[1]
-                    in_think_block = True
+                    in_think = True
                 else:
-                    safe_output = buffer[:-10] if len(buffer) > 10 else ""
-                    if safe_output:
-                        print(safe_output, end="", flush=True)
-                        buffer = buffer[len(safe_output):]
+                    if len(buffer) > 8:
+                        print(buffer[:-8], end="", flush=True)
+                        buffer = buffer[-8:]
                     break
             else:
                 if "</think>" in buffer:
+                    print("]", end="", flush=True)
                     buffer = buffer.split("</think>", 1)[1]
-                    in_think_block = False
+                    in_think = False
                 else:
                     break
 
-    if buffer and not in_think_block:
+    if buffer and not in_think:
         print(buffer, end="", flush=True)
-
     print()
-    return full_response
 
-def chat(messages):
-    user_message = messages[-1]["content"]
-    memory_context = get_memory_context(user_message)
-    knowledge_context = get_knowledge_context(user_message)
+    if "</think>" in full_response:
+        return full_response.split("</think>")[-1].strip()
+    return full_response.strip()
 
-    use_thinking = is_complex_query(user_message)
-    thinking_instruction = "" if use_thinking else "For simple queries, respond directly without extensive reasoning. "
+last_tool_context = {"results": None}
 
-    system_message = f"""You are Menzi, an autonomous AI assistant for {USER_ID}. {thinking_instruction}You have access to tools and should use them proactively:
+def chat(conversation):
+    global last_tool_context
+    user_msg = conversation[-1]["content"]
 
-- add_user_memory: When user shares personal info, preferences, or facts about themselves
-- get_user_memories: When you need to recall something about the user
-- add_to_knowledge_base: When user discusses projects, research, news, or things they're working on
-- search_knowledge_base: When you need context from previous conversations or stored knowledge
-- web_search: When you need current information from the internet
+    memories = get_all_memories()
+    memory_str = ""
+    if memories:
+        memory_str = "KNOWN FACTS ABOUT USER:\n" + "\n".join(f"- {m}" for m in memories)
 
-{memory_context}
-{knowledge_context}
+    knowledge_str = get_knowledge_context(user_msg)
 
-Be proactive about storing relevant information. Respond naturally and helpfully. Keep responses concise."""
+    recent_context = ""
+    if last_tool_context["results"]:
+        recent_context = f"\nRECENT SEARCH/TOOL RESULTS (for follow-up questions):\n{last_tool_context['results']}\n"
 
-    full_messages = [{"role": "system", "content": system_message}] + messages
+    system = f"""You are Menzi, a conversational AI assistant. You maintain context across the conversation.
+
+{memory_str}
+{recent_context}
+{knowledge_str}
+
+Tools: remember (save facts about user), save_note (save info), search_notes (search saved), web_search (internet).
+
+Guidelines:
+- Address user by name if known
+- When presenting search results, number them for easy reference
+- If user says "tell me more about #2" or "the first one", use the recent context above
+- Be conversational, not robotic
+- Keep responses concise but informative"""
+
+    full_messages = [{"role": "system", "content": system}] + conversation
 
     response = ollama.chat(
         model=MODEL,
@@ -373,74 +366,77 @@ Be proactive about storing relevant information. Respond naturally and helpfully
         tools=tools
     )
 
+    tool_results = []
     while response["message"].get("tool_calls"):
-        for tool_call in response["message"]["tool_calls"]:
-            tool_name = tool_call["function"]["name"]
-            arguments = tool_call["function"]["arguments"]
-            print(f"\n[TOOL] {tool_name}: {arguments}")
-            result = execute_tool(tool_name, arguments)
-            print(f"[RESULT] {result}")
+        for tc in response["message"]["tool_calls"]:
+            name = tc["function"]["name"]
+            args = tc["function"]["arguments"]
+            print(f"\n[TOOL] {name}: {args}")
+            result = execute_tool(name, args)
+            print(f"[RESULT] {result[:200]}..." if len(result) > 200 else f"[RESULT] {result}")
+            tool_results.append(result)
             full_messages.append(response["message"])
             full_messages.append({"role": "tool", "content": result})
 
-        response = ollama.chat(
-            model=MODEL,
-            messages=full_messages,
-            tools=tools
-        )
+        response = ollama.chat(model=MODEL, messages=full_messages, tools=tools)
 
-    if response["message"].get("tool_calls"):
-        return response["message"]["content"]
+    if tool_results:
+        last_tool_context["results"] = "\n---\n".join(tool_results)
 
-    full_messages_for_stream = full_messages.copy()
-    if response["message"]["content"]:
-        return stream_response(full_messages_for_stream, use_thinking)
+    if response["message"].get("content"):
+        content = response["message"]["content"]
+        if "</think>" in content:
+            content = content.split("</think>")[-1].strip()
+        print(f"\nMenzi: {content}")
+        return content
 
-    return stream_response(full_messages, use_thinking)
-
-def clean_response(text):
-    if "<think>" in text and "</think>" in text:
-        parts = text.split("</think>")
-        if len(parts) > 1:
-            return parts[-1].strip()
-    if "<think>" in text:
-        parts = text.split("<think>")
-        return parts[0].strip()
-    return text.strip()
+    return stream_chat(full_messages)
 
 def main():
     print("=" * 50)
     print("Menzi - Autonomous Home Assistant")
     print("=" * 50)
-    print("Commands: 'quit' to exit, 'clear' to reset conversation\n")
+    print("Commands: quit, clear, memories, forget\n")
+
+    load_memories_from_disk()
+    if USER_MEMORIES:
+        print(f"[LOADED] {len(USER_MEMORIES)} memories")
 
     conversation = []
 
     while True:
         user_input = input("\nYou: ").strip()
+
+        if not user_input:
+            continue
         if user_input.lower() == "quit":
             print("Goodbye!")
             break
         if user_input.lower() == "clear":
-            if conversation:
-                summary = summarize_conversation(conversation)
-                if summary:
-                    add_to_knowledge_base(f"Conversation summary: {summary}", "conversation_history")
-                    print("[CONTEXT] Saved conversation summary")
             conversation = []
-            print("[CONTEXT] Conversation cleared. Long-term memory preserved.")
+            print("[CLEARED] Conversation reset. Memories preserved.")
             continue
-        if not user_input:
+        if user_input.lower() == "memories":
+            mems = get_all_memories()
+            if mems:
+                print("\n[MEMORIES]")
+                for i, m in enumerate(mems, 1):
+                    print(f"  {i}. {m}")
+            else:
+                print("[MEMORIES] None stored yet.")
+            continue
+        if user_input.lower() == "forget":
+            clear_memories()
+            print("[CLEARED] All memories deleted.")
             continue
 
+        process_user_input(user_input)
         conversation.append({"role": "user", "content": user_input})
+        conversation = manage_context(conversation)
 
         try:
-            conversation = manage_context(conversation)
             response = chat(conversation)
-            if response:
-                response = clean_response(response)
-                conversation.append({"role": "assistant", "content": response})
+            conversation.append({"role": "assistant", "content": response})
         except Exception as e:
             print(f"\nError: {e}")
             import traceback

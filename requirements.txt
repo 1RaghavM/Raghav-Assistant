@@ -1,4 +1,2 @@
 ollama
 chromadb
-mem0ai
-python-dotenv

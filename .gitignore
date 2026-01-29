@@ -2,4 +2,4 @@ chroma_db/
 mem0_db/
 .claude
 .env
-
+user_memories.json
