@@ -31,5 +31,16 @@
       }
     ],
     "recent_topics": []
+  },
+  "logos": {
+    "interaction_times": [
+      {
+        "hour": 14,
+        "day": "weekday",
+        "count": 5
+      }
+    ],
+    "common_queries": [],
+    "recent_topics": []
   }
 }

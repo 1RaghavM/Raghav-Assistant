@@ -11,6 +11,9 @@ PLATFORM = "mac" if platform.system() == "Darwin" else "pi"
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
 LLM_MODEL = "gpt-oss-120b"
 
+# STT - SambaNova Whisper API (cloud)
+SAMBANOVA_API_KEY = os.getenv("SAMBANOVA_API_KEY")
+
 # VLM - Local (Ollama on Mac, Hailo on Pi)
 VLM_MODEL = "moondream" if PLATFORM == "mac" else "qwen2.5-vl-3b"
 

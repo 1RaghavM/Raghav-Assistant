@@ -1,14 +1,12 @@
-"""Menzi Voice Assistant - Cerebras LLM Version."""
+"""Menzi Voice Assistant - Cerebras LLM + SambaNova Whisper."""
 
 import os
 import re
 import sys
 import subprocess
 import platform
-import time
 import json
 import numpy as np
-from datetime import datetime
 from typing import Optional
 
 from cerebras.cloud.sdk import Cerebras
@@ -19,7 +17,6 @@ from config import (
     VOICE_EMBEDDINGS_DIR,
     FACE_ENCODINGS_DIR,
     MAX_MESSAGES,
-    VISION_CONTEXT_EXPIRY_MINUTES,
     ADMIN_USER,
 )
 from core.tools import get_openai_tools
@@ -30,6 +27,7 @@ from memory.routines import RoutineTracker
 from identity.resolver import IdentityResolver
 from vision.camera import Camera
 from vision.vlm import VLM
+from audio.stt import VoiceInput
 
 
 def speak(text: str):
@@ -46,49 +44,11 @@ def speak(text: str):
         subprocess.run(["espeak", "-s", "150", text], capture_output=True)
 
 
-def listen() -> tuple[Optional[str], Optional[np.ndarray]]:
-    """Listen for speech and return (text, audio_array)."""
-    import speech_recognition as sr
-
-    rec = sr.Recognizer()
-    rec.energy_threshold = 300
-    rec.pause_threshold = 1.5
-    rec.dynamic_energy_threshold = False
-
-    print("\n🎤 Listening... (speak now)")
-
-    try:
-        with sr.Microphone(sample_rate=16000) as source:
-            audio = rec.listen(source, timeout=10, phrase_time_limit=20)
-
-        print("⏳ Processing...")
-
-        audio_data = np.frombuffer(
-            audio.get_raw_data(), dtype=np.int16
-        ).astype(np.float32) / 32768.0
-
-        text = rec.recognize_google(audio)
-        return text, audio_data
-
-    except sr.WaitTimeoutError:
-        print("⏰ No speech detected")
-        return None, None
-    except sr.UnknownValueError:
-        print("❓ Could not understand")
-        return None, None
-    except sr.RequestError as e:
-        print(f"❌ Speech recognition error: {e}")
-        return None, None
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return None, None
-
-
 class Menzi:
-    """Voice assistant with Cerebras LLM."""
+    """Voice assistant with Cerebras LLM + SambaNova Whisper."""
 
     def __init__(self):
-        print("🚀 Starting Menzi...")
+        print("Starting Menzi...")
 
         if not CEREBRAS_API_KEY:
             raise ValueError("Set CEREBRAS_API_KEY in .env")
@@ -99,6 +59,9 @@ class Menzi:
         self.tools = get_openai_tools()
 
         print(f"[LLM] Using Cerebras {self.model}")
+
+        # Voice input with wake word + cloud STT
+        self.voice = VoiceInput()
 
         # Components
         self.identity = IdentityResolver(
@@ -117,7 +80,7 @@ class Menzi:
         self.executor = None
         self.messages = []
 
-        print("✅ Ready!")
+        print("Ready!")
 
     def _system_prompt(self) -> str:
         parts = ["You are Menzi, a voice assistant. Be brief (1-2 sentences)."]
@@ -238,7 +201,7 @@ class Menzi:
         """Identify user from voice."""
         user, conf, _ = self.identity.resolve(voice_audio=audio)
         if user and conf >= 0.6:
-            print(f"👤 Identified: {user} ({conf:.0%})")
+            print(f"Identified: {user} ({conf:.0%})")
             return user
         return None
 
@@ -246,7 +209,8 @@ class Menzi:
         """Enroll new user."""
         speak("I don't recognize you. Please say your first name.")
 
-        name_text, _ = listen()
+        # Listen without wake word for enrollment
+        name_text, _ = self.voice.listen(require_wake_word=False)
         if not name_text:
             return None
 
@@ -257,7 +221,7 @@ class Menzi:
             speak("I didn't catch that.")
             return None
 
-        print(f"📝 Enrolling: {name}")
+        print(f"Enrolling: {name}")
         speak(f"Hi {name}! Saving your voice.")
 
         self.identity.enroll_user(name, voice_audio=audio)
@@ -279,16 +243,17 @@ class Menzi:
         """Main loop."""
         print("\n" + "=" * 40)
         print("   MENZI VOICE ASSISTANT")
-        print(f"   Powered by Cerebras {self.model}")
+        print(f"   Cerebras {self.model} + SambaNova Whisper")
         print("=" * 40)
-        print("Say 'quit' to exit\n")
+        print("Say 'Menzi' to start, 'quit' to exit\n")
 
         speak("Hello! I'm Menzi.")
 
         try:
-            # Identify
+            # Identify - no wake word needed for initial identification
             speak("Who am I speaking with?")
-            text, audio = listen()
+            self.voice.set_wake_word_enabled(False)
+            text, audio = self.voice.listen()
 
             if audio is not None:
                 user = self.identify(audio)
@@ -304,25 +269,29 @@ class Menzi:
                 self._set_user("guest")
                 speak("I'll call you guest for now.")
 
+            # Enable wake word for main loop
+            self.voice.set_wake_word_enabled(True)
+            speak("Say Menzi when you need me.")
+
             # Chat loop
             while True:
-                text, audio = listen()
+                text, audio = self.voice.listen()
 
                 if not text:
                     continue
 
-                print(f"\n💬 You: {text}")
+                print(f"\nYou: {text}")
 
                 if text.lower().strip() in ["quit", "exit", "stop", "bye", "goodbye"]:
                     speak("Goodbye!")
                     break
 
                 response = self.ask(text)
-                print(f"🤖 Menzi: {response}")
+                print(f"Menzi: {response}")
                 speak(response)
 
         except KeyboardInterrupt:
-            print("\n👋 Interrupted")
+            print("\nInterrupted")
             speak("Goodbye!")
         finally:
             self.camera.release()

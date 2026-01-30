@@ -13,5 +13,10 @@
     "admin": false,
     "created_at": "2026-01-30T13:07:45.840841",
     "default_location": null
+  },
+  "logos": {
+    "admin": false,
+    "created_at": "2026-01-30T14:41:51.688908",
+    "default_location": null
   }
 }

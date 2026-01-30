@@ -11,6 +11,10 @@ SpeechRecognition
 pyttsx3
 pyaudio
 
+# Cloud APIs
+openai  # For SambaNova Whisper (OpenAI-compatible)
+cerebras-cloud-sdk
+
 # Identity
 face_recognition
 resemblyzer
