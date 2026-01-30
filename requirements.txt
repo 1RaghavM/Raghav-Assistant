@@ -1,6 +1,10 @@
 # Core
-ollama
+google-generativeai
+python-dotenv
 chromadb
+
+# VLM (local - Ollama for Mac dev)
+ollama
 
 # Audio
 SpeechRecognition
