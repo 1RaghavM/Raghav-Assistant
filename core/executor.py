@@ -47,10 +47,12 @@ class ToolExecutor:
         is_admin: bool,
         data_dir: str = None,
         camera=None,
-        vlm=None
+        vlm=None,
+        on_user_change=None  # Callback when user is set/changed
     ):
         self.current_user = current_user
         self.is_admin = is_admin
+        self.on_user_change = on_user_change
 
         if data_dir is None:
             from config import DATA_DIR, CHROMA_DB_PATH
@@ -80,7 +82,9 @@ class ToolExecutor:
     def execute(self, tool_name: str, arguments: Dict[str, Any]) -> str:
         """Execute a tool and return the result as a string."""
         try:
-            if tool_name == "remember":
+            if tool_name == "set_user":
+                return self._set_user(arguments["name"])
+            elif tool_name == "remember":
                 return self._remember(arguments["fact"])
             elif tool_name == "save_note":
                 return self._save_note(arguments["content"], arguments["topic"])
@@ -100,6 +104,32 @@ class ToolExecutor:
                 return f"Unknown tool: {tool_name}"
         except Exception as e:
             return f"Tool error: {str(e)}"
+
+    def _set_user(self, name: str) -> str:
+        """Set the current user's name."""
+        import re
+        name = name.strip().lower()
+        name = re.sub(r'[^a-z]', '', name)
+
+        if len(name) < 2:
+            return "Invalid name."
+
+        # Create user if doesn't exist
+        if not self.registry.get_user(name):
+            from config import ADMIN_USER
+            is_admin = name == ADMIN_USER.lower()
+            self.registry.create_user(name, admin=is_admin)
+
+        # Update current user
+        old_user = self.current_user
+        self.current_user = name
+        self.is_admin = self.registry.is_admin(name)
+
+        # Notify callback
+        if self.on_user_change:
+            self.on_user_change(name)
+
+        return f"User set to {name}."
 
     def _remember(self, fact: str) -> str:
         if self.user_memory.add(self.current_user, fact):

@@ -88,16 +88,17 @@ class Menzi:
         print("Ready!")
 
     def _system_prompt(self) -> str:
-        parts = ["You are Menzi, a voice assistant. Be brief (1-2 sentences)."]
+        parts = ["You are Menzi, a helpful voice assistant. Be conversational and brief (1-2 sentences)."]
 
-        if self.user:
-            parts.append(f"User: {self.user}")
+        if self.user and self.user != "unknown":
+            parts.append(f"You're speaking with {self.user}.")
             mems = self.memory.get_all(self.user)
             if mems:
-                parts.append(f"Facts: {'; '.join(mems[:3])}")
-
-        if self.is_admin:
-            parts.append("Admin user.")
+                parts.append(f"You know: {'; '.join(mems[:5])}")
+            if self.is_admin:
+                parts.append("They have admin access.")
+        else:
+            parts.append("You don't know who this is yet. If context requires knowing their name, ask naturally.")
 
         return " ".join(parts)
 
@@ -106,14 +107,26 @@ class Menzi:
             {"role": "system", "content": self._system_prompt()}
         ]
 
-    def _set_user(self, name: str):
+    def _on_user_change(self, name: str):
+        """Callback when user is changed via tool."""
         self.user = name
         self.is_admin = self.registry.is_admin(name)
+        if self.executor:
+            self.executor.current_user = name
+            self.executor.is_admin = self.is_admin
+        # Update system prompt with new user info
+        if self.messages:
+            self.messages[0] = {"role": "system", "content": self._system_prompt()}
+
+    def _set_user(self, name: str):
+        self.user = name
+        self.is_admin = self.registry.is_admin(name) if name != "unknown" else False
         self.executor = ToolExecutor(
             current_user=name,
             is_admin=self.is_admin,
             camera=self.camera,
-            vlm=self.vlm
+            vlm=self.vlm,
+            on_user_change=self._on_user_change
         )
         self._reset_messages()
 
@@ -324,40 +337,24 @@ class Menzi:
     def run(self):
         """Main loop with streaming responses."""
         print("\n" + "=" * 40)
-        print("   MENZI VOICE ASSISTANT")
-        print("   Streaming: Cerebras + Whisper + Edge TTS")
-        print("=" * 40)
-        print("Say 'Menzi' to start a conversation\n")
+        print("   MENZI - Say 'Menzi' to start")
+        print("=" * 40 + "\n")
 
-        self._speak("Hello! I'm Menzi.")
+        # Start with unknown user - will identify from voice
+        self._set_user("unknown")
 
         try:
-            # Identify - no wake word needed for initial identification
-            self._speak("Who am I speaking with?")
-            text, audio = self.voice.listen(require_wake_word=False)
-
-            if audio is not None:
-                user = self.identify(audio)
-                if user:
-                    self._set_user(user)
-                    self._speak(f"Welcome back, {user}!")
-                else:
-                    user = self.enroll(audio)
-                    if user:
-                        self._set_user(user)
-
-            if not self.user:
-                self._set_user("guest")
-                self._speak("I'll call you guest for now.")
-
-            self._speak("Say Menzi when you need me.")
-
-            # Chat loop with conversation mode
             while True:
                 text, audio = self.voice.listen()
 
                 if not text:
                     continue
+
+                # Try to identify user from voice (silently in background)
+                if audio is not None and self.user == "unknown":
+                    identified = self.identify(audio)
+                    if identified:
+                        self._set_user(identified)
 
                 print(f"\nYou: {text}")
 
@@ -367,11 +364,10 @@ class Menzi:
 
                 # ask() handles both streaming and speaking internally
                 print("Menzi: ", end="", flush=True)
-                self.ask(text)  # Response is printed and spoken inside ask()
+                self.ask(text)
 
         except KeyboardInterrupt:
             print("\nInterrupted")
-            self._speak("Goodbye!")
         finally:
             self.camera.release()
 

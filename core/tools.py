@@ -11,6 +11,20 @@ from typing import List, Dict, Any
 
 TOOL_DEFINITIONS = [
     {
+        "name": "set_user",
+        "description": "Set the current user's name when they introduce themselves or you learn who they are. Use when someone says 'I'm [name]' or 'My name is [name]'.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The user's first name (lowercase)"
+                }
+            },
+            "required": ["name"]
+        }
+    },
+    {
         "name": "remember",
         "description": "Store a fact about the current user for future reference. Use when user shares personal information like preferences, facts about themselves, or things to remember.",
         "parameters": {
