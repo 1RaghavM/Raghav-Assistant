@@ -165,37 +165,86 @@ class WakeWordListener:
 
 
 class VoiceInput:
-    """Combined wake word detection + cloud STT."""
+    """Combined wake word detection + cloud STT with conversation mode."""
+
+    # Conversation timeout - how long to stay active after last interaction
+    CONVERSATION_TIMEOUT = 30  # seconds
 
     def __init__(self):
         self.stt = SambanovaSTT()
         self.wake_listener = WakeWordListener()
         self.wake_word_enabled = True
 
+        # Conversation mode state
+        self.in_conversation = False
+        self.last_interaction = None
+
     def set_wake_word_enabled(self, enabled: bool):
         """Enable/disable wake word requirement."""
         self.wake_word_enabled = enabled
 
+    def start_conversation(self):
+        """Start conversation mode - no wake word needed for follow-ups."""
+        self.in_conversation = True
+        self.last_interaction = datetime.now()
+
+    def end_conversation(self):
+        """End conversation mode - require wake word again."""
+        self.in_conversation = False
+        self.last_interaction = None
+
+    def _is_conversation_active(self) -> bool:
+        """Check if we're still in an active conversation."""
+        if not self.in_conversation:
+            return False
+
+        if self.last_interaction is None:
+            return False
+
+        elapsed = (datetime.now() - self.last_interaction).total_seconds()
+        if elapsed > self.CONVERSATION_TIMEOUT:
+            print(f"\n[Conversation timed out after {self.CONVERSATION_TIMEOUT}s]")
+            self.end_conversation()
+            return False
+
+        return True
+
     def listen(self, require_wake_word: bool = None) -> Tuple[Optional[str], Optional[np.ndarray]]:
-        """Listen for speech, optionally requiring wake word first.
+        """Listen for speech with conversation mode support.
+
+        In conversation mode, no wake word is needed for follow-up questions.
+        After CONVERSATION_TIMEOUT seconds of silence, reverts to requiring wake word.
 
         Args:
-            require_wake_word: Override instance setting
+            require_wake_word: Override instance setting (None = auto based on conversation state)
 
         Returns:
             (transcribed_text, audio_array) or (None, None) on failure
         """
         import speech_recognition as sr
 
-        use_wake = require_wake_word if require_wake_word is not None else self.wake_word_enabled
+        # Determine if we need wake word
+        if require_wake_word is not None:
+            use_wake = require_wake_word
+        elif self._is_conversation_active():
+            use_wake = False  # In conversation, no wake word needed
+        else:
+            use_wake = self.wake_word_enabled
 
-        # Wait for wake word if enabled
+        # Wait for wake word if needed
         if use_wake:
-            if not self.wake_listener.wait_for_wake_word(timeout=60):
+            if not self.wake_listener.wait_for_wake_word(timeout=120):
                 return None, None
+            # Wake word detected, start conversation
+            self.start_conversation()
 
         # Now listen for the actual command
-        print("\n Listening... (speak now)")
+        remaining = ""
+        if self._is_conversation_active():
+            elapsed = (datetime.now() - self.last_interaction).total_seconds()
+            remaining = f" [{int(self.CONVERSATION_TIMEOUT - elapsed)}s until timeout]"
+
+        print(f"\nListening...{remaining}")
 
         recognizer = sr.Recognizer()
         recognizer.energy_threshold = 300
@@ -204,9 +253,11 @@ class VoiceInput:
 
         try:
             with sr.Microphone(sample_rate=SAMPLE_RATE) as source:
-                audio = recognizer.listen(source, timeout=10, phrase_time_limit=20)
+                # Shorter timeout during conversation
+                timeout = 8 if self._is_conversation_active() else 10
+                audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=20)
 
-            print(" Processing with Whisper...")
+            print("Processing with Whisper...")
 
             # Get raw audio for voice ID
             audio_data = np.frombuffer(
@@ -217,16 +268,23 @@ class VoiceInput:
             text = self.stt.transcribe(audio_data)
 
             if text:
+                # Update conversation timestamp
+                self.last_interaction = datetime.now()
                 return text, audio_data
             else:
-                print(" Could not transcribe")
+                print("Could not transcribe")
                 return None, audio_data
 
         except sr.WaitTimeoutError:
-            print(" No speech detected")
+            # During conversation, timeout means end of conversation
+            if self._is_conversation_active():
+                print("[No follow-up detected]")
+                self.end_conversation()
+            else:
+                print("No speech detected")
             return None, None
         except Exception as e:
-            print(f" Error: {e}")
+            print(f"Error: {e}")
             return None, None
 
 

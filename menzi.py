@@ -1,10 +1,8 @@
-"""Menzi Voice Assistant - Cerebras LLM + SambaNova Whisper."""
+"""Menzi Voice Assistant - Cerebras LLM + SambaNova Whisper + Edge TTS."""
 
 import os
 import re
 import sys
-import subprocess
-import platform
 import json
 import numpy as np
 from typing import Optional
@@ -28,20 +26,7 @@ from identity.resolver import IdentityResolver
 from vision.camera import Camera
 from vision.vlm import VLM
 from audio.stt import VoiceInput
-
-
-def speak(text: str):
-    """Speak text using system TTS."""
-    text = re.sub(r'[^\x00-\x7F]+', '', text)
-    text = re.sub(r'[\*#`\[\]]', '', text)
-    text = text.strip()
-    if not text:
-        return
-
-    if platform.system() == "Darwin":
-        subprocess.run(["say", "-r", "200", text], capture_output=True)
-    elif platform.system() == "Linux":
-        subprocess.run(["espeak", "-s", "150", text], capture_output=True)
+from audio.tts import speak, get_tts
 
 
 class Menzi:
@@ -243,17 +228,16 @@ class Menzi:
         """Main loop."""
         print("\n" + "=" * 40)
         print("   MENZI VOICE ASSISTANT")
-        print(f"   Cerebras {self.model} + SambaNova Whisper")
+        print(f"   Cerebras + SambaNova Whisper + Edge TTS")
         print("=" * 40)
-        print("Say 'Menzi' to start, 'quit' to exit\n")
+        print("Say 'Menzi' to start a conversation\n")
 
         speak("Hello! I'm Menzi.")
 
         try:
             # Identify - no wake word needed for initial identification
             speak("Who am I speaking with?")
-            self.voice.set_wake_word_enabled(False)
-            text, audio = self.voice.listen()
+            text, audio = self.voice.listen(require_wake_word=False)
 
             if audio is not None:
                 user = self.identify(audio)
@@ -269,12 +253,14 @@ class Menzi:
                 self._set_user("guest")
                 speak("I'll call you guest for now.")
 
-            # Enable wake word for main loop
-            self.voice.set_wake_word_enabled(True)
-            speak("Say Menzi when you need me.")
+            speak("Say Menzi when you need me. I'll keep listening for follow-ups.")
 
-            # Chat loop
+            # Chat loop with conversation mode
             while True:
+                # Conversation mode handles wake word automatically
+                # - First time: waits for "Menzi"
+                # - During conversation: no wake word needed
+                # - After 30s silence: requires "Menzi" again
                 text, audio = self.voice.listen()
 
                 if not text:
