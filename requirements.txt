@@ -1,2 +1,19 @@
+# Core
 ollama
 chromadb
+
+# Audio
+SpeechRecognition
+pyttsx3
+pyaudio
+
+# Identity
+face_recognition
+resemblyzer
+numpy
+
+# Vision
+opencv-python
+
+# Services
+requests
