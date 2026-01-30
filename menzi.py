@@ -1,11 +1,11 @@
-"""Menzi Voice Assistant - Cerebras LLM + SambaNova Whisper + Edge TTS."""
+"""Menzi Voice Assistant - Streaming Cerebras LLM + SambaNova Whisper + Edge TTS."""
 
 import os
 import re
 import sys
 import json
 import numpy as np
-from typing import Optional
+from typing import Optional, Generator
 
 from cerebras.cloud.sdk import Cerebras
 
@@ -26,11 +26,23 @@ from identity.resolver import IdentityResolver
 from vision.camera import Camera
 from vision.vlm import VLM
 from audio.stt import VoiceInput
-from audio.tts import speak, get_tts
+
+# Try streaming TTS first, fall back to regular
+try:
+    from audio.streaming_tts import ChunkedStreamingTTS, REALTIME_TTS_AVAILABLE
+    if REALTIME_TTS_AVAILABLE:
+        STREAMING_TTS = True
+    else:
+        STREAMING_TTS = False
+except ImportError:
+    STREAMING_TTS = False
+
+if not STREAMING_TTS:
+    from audio.tts import speak
 
 
 class Menzi:
-    """Voice assistant with Cerebras LLM + SambaNova Whisper."""
+    """Voice assistant with streaming Cerebras LLM + real-time TTS."""
 
     def __init__(self):
         print("Starting Menzi...")
@@ -47,6 +59,14 @@ class Menzi:
 
         # Voice input with wake word + cloud STT
         self.voice = VoiceInput()
+
+        # Streaming TTS for instant responses
+        if STREAMING_TTS:
+            self.tts = ChunkedStreamingTTS()
+            print("[TTS] Streaming mode enabled")
+        else:
+            self.tts = None
+            print("[TTS] Using non-streaming fallback")
 
         # Components
         self.identity = IdentityResolver(
@@ -97,8 +117,36 @@ class Menzi:
         )
         self._reset_messages()
 
+    def _speak(self, text: str):
+        """Speak text using available TTS."""
+        if self.tts:
+            self.tts.speak(text)
+        else:
+            speak(text)
+
+    def _stream_response(self) -> Generator[str, None, str]:
+        """Stream response from Cerebras, yielding chunks.
+
+        Returns full response at the end.
+        """
+        stream = self.client.chat.completions.create(
+            model=self.model,
+            messages=self.messages,
+            max_completion_tokens=300,
+            stream=True,
+        )
+
+        full_response = ""
+        for chunk in stream:
+            if chunk.choices[0].delta.content:
+                content = chunk.choices[0].delta.content
+                full_response += content
+                yield content
+
+        return full_response
+
     def ask(self, text: str) -> str:
-        """Send message to Cerebras."""
+        """Send message to Cerebras with streaming."""
         self.messages.append({"role": "user", "content": text})
 
         # Trim history
@@ -107,6 +155,7 @@ class Menzi:
             self.messages = [system] + self.messages[-(MAX_MESSAGES - 1):]
 
         try:
+            # First check for tool calls (non-streaming)
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=self.messages,
@@ -117,66 +166,99 @@ class Menzi:
 
             msg = response.choices[0].message
 
-            # Handle tool calls
-            while msg.tool_calls:
-                # Add assistant message with tool calls
-                self.messages.append({
-                    "role": "assistant",
-                    "content": msg.content,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments
-                            }
-                        }
-                        for tc in msg.tool_calls
-                    ]
-                })
-
-                # Execute each tool
-                for tc in msg.tool_calls:
-                    name = tc.function.name
-                    try:
-                        args = json.loads(tc.function.arguments)
-                    except:
-                        args = {}
-
-                    print(f"🔧 Tool: {name}")
-                    result = self.executor.execute(name, args)
-
-                    # Add tool result
+            # Handle tool calls (can't stream with tools)
+            if msg.tool_calls:
+                while msg.tool_calls:
                     self.messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": result
+                        "role": "assistant",
+                        "content": msg.content,
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments
+                                }
+                            }
+                            for tc in msg.tool_calls
+                        ]
                     })
 
-                # Get next response
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=self.messages,
-                    tools=self.tools,
-                    tool_choice="auto",
-                    max_completion_tokens=300,
-                )
-                msg = response.choices[0].message
+                    for tc in msg.tool_calls:
+                        name = tc.function.name
+                        try:
+                            args = json.loads(tc.function.arguments)
+                        except:
+                            args = {}
 
-            # Extract final response
-            content = msg.content or "I'm not sure."
+                        print(f"[Tool] {name}")
+                        result = self.executor.execute(name, args)
 
-            # Clean thinking tags if present
-            if "</think>" in content:
-                content = content.split("</think>")[-1].strip()
+                        self.messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": result
+                        })
 
-            self.messages.append({"role": "assistant", "content": content})
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=self.messages,
+                        tools=self.tools,
+                        tool_choice="auto",
+                        max_completion_tokens=300,
+                    )
+                    msg = response.choices[0].message
+
+                content = msg.content or "I'm not sure."
+
+                if "</think>" in content:
+                    content = content.split("</think>")[-1].strip()
+
+                self.messages.append({"role": "assistant", "content": content})
+
+                if self.user:
+                    self.routines.record_interaction(self.user)
+
+                return content
+
+            # No tool calls - use streaming for faster response
+            # Remove the non-streaming response from history and re-do with streaming
+            full_response = ""
+
+            if STREAMING_TTS and self.tts:
+                # Stream LLM -> TTS pipeline
+                def text_generator():
+                    nonlocal full_response
+                    stream = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=self.messages,
+                        max_completion_tokens=300,
+                        stream=True,
+                    )
+                    for chunk in stream:
+                        if chunk.choices[0].delta.content:
+                            content = chunk.choices[0].delta.content
+                            full_response += content
+                            print(content, end="", flush=True)
+                            yield content
+                    print()  # Newline after streaming
+
+                self.tts.feed_and_play(text_generator())
+            else:
+                # Non-streaming fallback
+                full_response = msg.content or "I'm not sure."
+
+            # Clean thinking tags
+            if "</think>" in full_response:
+                full_response = full_response.split("</think>")[-1].strip()
+
+            self.messages.append({"role": "assistant", "content": full_response})
 
             if self.user:
                 self.routines.record_interaction(self.user)
 
-            return content
+            return full_response
 
         except Exception as e:
             print(f"❌ Cerebras error: {e}")
@@ -192,7 +274,7 @@ class Menzi:
 
     def enroll(self, audio: np.ndarray) -> Optional[str]:
         """Enroll new user."""
-        speak("I don't recognize you. Please say your first name.")
+        self._speak("I don't recognize you. Please say your first name.")
 
         # Listen without wake word for enrollment
         name_text, _ = self.voice.listen(require_wake_word=False)
@@ -203,11 +285,11 @@ class Menzi:
         name = re.sub(r'[^a-z]', '', name)
 
         if len(name) < 2:
-            speak("I didn't catch that.")
+            self._speak("I didn't catch that.")
             return None
 
         print(f"Enrolling: {name}")
-        speak(f"Hi {name}! Saving your voice.")
+        self._speak(f"Hi {name}! Saving your voice.")
 
         self.identity.enroll_user(name, voice_audio=audio)
 
@@ -221,29 +303,29 @@ class Menzi:
         is_admin = name == ADMIN_USER.lower()
         self.registry.create_user(name, admin=is_admin)
 
-        speak(f"Nice to meet you, {name}!")
+        self._speak(f"Nice to meet you, {name}!")
         return name
 
     def run(self):
-        """Main loop."""
+        """Main loop with streaming responses."""
         print("\n" + "=" * 40)
         print("   MENZI VOICE ASSISTANT")
-        print(f"   Cerebras + SambaNova Whisper + Edge TTS")
+        print("   Streaming: Cerebras + Whisper + Edge TTS")
         print("=" * 40)
         print("Say 'Menzi' to start a conversation\n")
 
-        speak("Hello! I'm Menzi.")
+        self._speak("Hello! I'm Menzi.")
 
         try:
             # Identify - no wake word needed for initial identification
-            speak("Who am I speaking with?")
+            self._speak("Who am I speaking with?")
             text, audio = self.voice.listen(require_wake_word=False)
 
             if audio is not None:
                 user = self.identify(audio)
                 if user:
                     self._set_user(user)
-                    speak(f"Welcome back, {user}!")
+                    self._speak(f"Welcome back, {user}!")
                 else:
                     user = self.enroll(audio)
                     if user:
@@ -251,16 +333,12 @@ class Menzi:
 
             if not self.user:
                 self._set_user("guest")
-                speak("I'll call you guest for now.")
+                self._speak("I'll call you guest for now.")
 
-            speak("Say Menzi when you need me. I'll keep listening for follow-ups.")
+            self._speak("Say Menzi when you need me.")
 
             # Chat loop with conversation mode
             while True:
-                # Conversation mode handles wake word automatically
-                # - First time: waits for "Menzi"
-                # - During conversation: no wake word needed
-                # - After 30s silence: requires "Menzi" again
                 text, audio = self.voice.listen()
 
                 if not text:
@@ -269,16 +347,21 @@ class Menzi:
                 print(f"\nYou: {text}")
 
                 if text.lower().strip() in ["quit", "exit", "stop", "bye", "goodbye"]:
-                    speak("Goodbye!")
+                    self._speak("Goodbye!")
                     break
 
+                # ask() handles streaming TTS internally when available
+                print("Menzi: ", end="", flush=True)
                 response = self.ask(text)
-                print(f"Menzi: {response}")
-                speak(response)
+
+                # Only speak separately if not using streaming TTS
+                if not (STREAMING_TTS and self.tts):
+                    print(response)
+                    self._speak(response)
 
         except KeyboardInterrupt:
             print("\nInterrupted")
-            speak("Goodbye!")
+            self._speak("Goodbye!")
         finally:
             self.camera.release()
 

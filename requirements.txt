@@ -10,7 +10,7 @@ ollama
 SpeechRecognition
 pyttsx3
 pyaudio
-edge-tts  # Natural Microsoft voices (free)
+edge-tts  # Natural Microsoft voices (free, streaming supported)
 
 # Cloud APIs
 openai  # For SambaNova Whisper (OpenAI-compatible)
