@@ -87,12 +87,6 @@ class WakeWordListener:
     """Listens for wake word using local speech recognition."""
 
     def __init__(self):
-        if not PYAUDIO_AVAILABLE:
-            raise ImportError("pyaudio required for wake word detection")
-
-        self.audio = pyaudio.PyAudio()
-        self.stream = None
-
         # Use Google Speech Recognition for wake word (lightweight)
         try:
             import speech_recognition as sr
@@ -100,9 +94,8 @@ class WakeWordListener:
             self.recognizer.energy_threshold = 300
             self.recognizer.pause_threshold = 0.8
             self.recognizer.dynamic_energy_threshold = False
-            self.use_local_recognition = True
         except ImportError:
-            self.use_local_recognition = False
+            raise ImportError("speech_recognition required for wake word detection")
 
         print(f"[WakeWord] Listening for '{WAKE_WORD}'")
 

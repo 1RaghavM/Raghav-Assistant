@@ -145,8 +145,16 @@ class Menzi:
 
         return full_response
 
-    def ask(self, text: str) -> str:
-        """Send message to Cerebras with streaming."""
+    def ask(self, text: str, speak_response: bool = True) -> str:
+        """Send message to Cerebras with streaming.
+
+        Args:
+            text: User message
+            speak_response: Whether to speak the response (default True)
+
+        Returns:
+            Response text
+        """
         self.messages.append({"role": "user", "content": text})
 
         # Trim history
@@ -210,7 +218,7 @@ class Menzi:
                     )
                     msg = response.choices[0].message
 
-                content = msg.content or "I'm not sure."
+                content = msg.content or "Done."
 
                 if "</think>" in content:
                     content = content.split("</think>")[-1].strip()
@@ -220,13 +228,17 @@ class Menzi:
                 if self.user:
                     self.routines.record_interaction(self.user)
 
+                # Speak tool response (non-streaming)
+                if speak_response and content:
+                    print(content)
+                    self._speak(content)
+
                 return content
 
             # No tool calls - use streaming for faster response
-            # Remove the non-streaming response from history and re-do with streaming
             full_response = ""
 
-            if STREAMING_TTS and self.tts:
+            if STREAMING_TTS and self.tts and speak_response:
                 # Stream LLM -> TTS pipeline
                 def text_generator():
                     nonlocal full_response
@@ -248,6 +260,9 @@ class Menzi:
             else:
                 # Non-streaming fallback
                 full_response = msg.content or "I'm not sure."
+                if speak_response:
+                    print(full_response)
+                    self._speak(full_response)
 
             # Clean thinking tags
             if "</think>" in full_response:
@@ -350,14 +365,9 @@ class Menzi:
                     self._speak("Goodbye!")
                     break
 
-                # ask() handles streaming TTS internally when available
+                # ask() handles both streaming and speaking internally
                 print("Menzi: ", end="", flush=True)
-                response = self.ask(text)
-
-                # Only speak separately if not using streaming TTS
-                if not (STREAMING_TTS and self.tts):
-                    print(response)
-                    self._speak(response)
+                self.ask(text)  # Response is printed and spoken inside ask()
 
         except KeyboardInterrupt:
             print("\nInterrupted")
