@@ -143,6 +143,28 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
     return TOOL_DEFINITIONS
 
 
+def get_openai_tools() -> List[Dict[str, Any]]:
+    """Get tools in OpenAI/Cerebras format.
+
+    Returns tools with strict mode for guaranteed schema compliance.
+    """
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": {
+                    **tool["parameters"],
+                    "additionalProperties": False  # Required for strict mode
+                },
+                "strict": True
+            }
+        }
+        for tool in TOOL_DEFINITIONS
+    ]
+
+
 def get_ollama_tools() -> List[Dict[str, Any]]:
     """Convert tool definitions to Ollama's tool format.
 

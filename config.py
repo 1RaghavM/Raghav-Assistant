@@ -7,9 +7,9 @@ load_dotenv()
 # Platform detection
 PLATFORM = "mac" if platform.system() == "Darwin" else "pi"
 
-# LLM - Google Gemini API
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-LLM_MODEL = "gemini-3-flash-preview"
+# LLM - Cerebras API (ultra-fast inference)
+CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
+LLM_MODEL = "gpt-oss-120b"
 
 # VLM - Local (Ollama on Mac, Hailo on Pi)
 VLM_MODEL = "moondream" if PLATFORM == "mac" else "qwen2.5-vl-3b"

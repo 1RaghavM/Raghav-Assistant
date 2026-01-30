@@ -1,4 +1,4 @@
-"""Menzi Voice Assistant - Local Voice Agent with Gemini."""
+"""Menzi Voice Assistant - Cerebras LLM Version."""
 
 import os
 import re
@@ -6,15 +6,15 @@ import sys
 import subprocess
 import platform
 import time
-import threading
+import json
 import numpy as np
 from datetime import datetime
 from typing import Optional
 
-import google.generativeai as genai
+from cerebras.cloud.sdk import Cerebras
 
 from config import (
-    GEMINI_API_KEY,
+    CEREBRAS_API_KEY,
     LLM_MODEL,
     VOICE_EMBEDDINGS_DIR,
     FACE_ENCODINGS_DIR,
@@ -22,7 +22,7 @@ from config import (
     VISION_CONTEXT_EXPIRY_MINUTES,
     ADMIN_USER,
 )
-from core.tools import get_gemini_tools
+from core.tools import get_openai_tools
 from core.executor import ToolExecutor
 from memory.user_memory import UserMemory
 from memory.user_registry import UserRegistry
@@ -63,12 +63,10 @@ def listen() -> tuple[Optional[str], Optional[np.ndarray]]:
 
         print("⏳ Processing...")
 
-        # Get audio data for voice ID
         audio_data = np.frombuffer(
             audio.get_raw_data(), dtype=np.int16
         ).astype(np.float32) / 32768.0
 
-        # Transcribe
         text = rec.recognize_google(audio)
         return text, audio_data
 
@@ -87,27 +85,20 @@ def listen() -> tuple[Optional[str], Optional[np.ndarray]]:
 
 
 class Menzi:
-    """Voice assistant with Gemini."""
+    """Voice assistant with Cerebras LLM."""
 
     def __init__(self):
         print("🚀 Starting Menzi...")
 
-        if not GEMINI_API_KEY:
-            raise ValueError("Set GEMINI_API_KEY in .env")
+        if not CEREBRAS_API_KEY:
+            raise ValueError("Set CEREBRAS_API_KEY in .env")
 
-        genai.configure(api_key=GEMINI_API_KEY)
+        # Initialize Cerebras client
+        self.client = Cerebras(api_key=CEREBRAS_API_KEY)
+        self.model = LLM_MODEL
+        self.tools = get_openai_tools()
 
-        self.tools = get_gemini_tools()
-        self.model = genai.GenerativeModel(
-            model_name=LLM_MODEL,
-            tools=[self.tools],
-            generation_config=genai.GenerationConfig(
-                temperature=0.7,
-                max_output_tokens=200,
-            )
-        )
-        self.chat = None
-        self.last_call = 0
+        print(f"[LLM] Using Cerebras {self.model}")
 
         # Components
         self.identity = IdentityResolver(
@@ -124,15 +115,9 @@ class Menzi:
         self.user = None
         self.is_admin = False
         self.executor = None
-        self.msg_count = 0
+        self.messages = []
 
         print("✅ Ready!")
-
-    def _rate_limit(self):
-        elapsed = time.time() - self.last_call
-        if elapsed < 0.5:
-            time.sleep(0.5 - elapsed)
-        self.last_call = time.time()
 
     def _system_prompt(self) -> str:
         parts = ["You are Menzi, a voice assistant. Be brief (1-2 sentences)."]
@@ -148,10 +133,10 @@ class Menzi:
 
         return " ".join(parts)
 
-    def _new_chat(self):
-        self._rate_limit()
-        self.chat = self.model.start_chat(history=[])
-        self.msg_count = 0
+    def _reset_messages(self):
+        self.messages = [
+            {"role": "system", "content": self._system_prompt()}
+        ]
 
     def _set_user(self, name: str):
         self.user = name
@@ -162,58 +147,91 @@ class Menzi:
             camera=self.camera,
             vlm=self.vlm
         )
-        self._new_chat()
+        self._reset_messages()
 
     def ask(self, text: str) -> str:
-        """Send message to Gemini."""
-        self.msg_count += 1
-        if self.msg_count > MAX_MESSAGES or not self.chat:
-            self._new_chat()
+        """Send message to Cerebras."""
+        self.messages.append({"role": "user", "content": text})
 
-        prompt = f"[{self._system_prompt()}]\n\nUser: {text}"
+        # Trim history
+        if len(self.messages) > MAX_MESSAGES:
+            system = self.messages[0]
+            self.messages = [system] + self.messages[-(MAX_MESSAGES - 1):]
 
         try:
-            self._rate_limit()
-            resp = self.chat.send_message(prompt)
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=self.messages,
+                tools=self.tools,
+                tool_choice="auto",
+                max_completion_tokens=300,
+            )
+
+            msg = response.choices[0].message
 
             # Handle tool calls
-            while resp.candidates and resp.candidates[0].content.parts:
-                fc = None
-                for part in resp.candidates[0].content.parts:
-                    if hasattr(part, 'function_call') and part.function_call:
-                        fc = part.function_call
-                        break
+            while msg.tool_calls:
+                # Add assistant message with tool calls
+                self.messages.append({
+                    "role": "assistant",
+                    "content": msg.content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments
+                            }
+                        }
+                        for tc in msg.tool_calls
+                    ]
+                })
 
-                if not fc:
-                    break
+                # Execute each tool
+                for tc in msg.tool_calls:
+                    name = tc.function.name
+                    try:
+                        args = json.loads(tc.function.arguments)
+                    except:
+                        args = {}
 
-                name = fc.name
-                args = dict(fc.args) if fc.args else {}
-                print(f"🔧 Tool: {name}")
+                    print(f"🔧 Tool: {name}")
+                    result = self.executor.execute(name, args)
 
-                result = self.executor.execute(name, args)
+                    # Add tool result
+                    self.messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result
+                    })
 
-                self._rate_limit()
-                resp = self.chat.send_message(
-                    genai.protos.Content(parts=[
-                        genai.protos.Part(function_response=genai.protos.FunctionResponse(
-                            name=name, response={"result": result}
-                        ))
-                    ])
+                # Get next response
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=self.messages,
+                    tools=self.tools,
+                    tool_choice="auto",
+                    max_completion_tokens=300,
                 )
+                msg = response.choices[0].message
 
-            # Extract response
-            for part in resp.candidates[0].content.parts:
-                if hasattr(part, 'text') and part.text:
-                    txt = part.text.strip()
-                    if "</think>" in txt:
-                        txt = txt.split("</think>")[-1].strip()
-                    return txt
+            # Extract final response
+            content = msg.content or "I'm not sure."
 
-            return "I'm not sure."
+            # Clean thinking tags if present
+            if "</think>" in content:
+                content = content.split("</think>")[-1].strip()
+
+            self.messages.append({"role": "assistant", "content": content})
+
+            if self.user:
+                self.routines.record_interaction(self.user)
+
+            return content
 
         except Exception as e:
-            print(f"❌ Gemini error: {e}")
+            print(f"❌ Cerebras error: {e}")
             return "Sorry, something went wrong."
 
     def identify(self, audio: np.ndarray) -> Optional[str]:
@@ -232,7 +250,6 @@ class Menzi:
         if not name_text:
             return None
 
-        # Get name (last word handles "My name is X")
         name = name_text.strip().split()[-1].lower()
         name = re.sub(r'[^a-z]', '', name)
 
@@ -245,7 +262,6 @@ class Menzi:
 
         self.identity.enroll_user(name, voice_audio=audio)
 
-        # Try face
         frame = self.camera.capture()
         if frame is not None:
             try:
@@ -263,6 +279,7 @@ class Menzi:
         """Main loop."""
         print("\n" + "=" * 40)
         print("   MENZI VOICE ASSISTANT")
+        print(f"   Powered by Cerebras {self.model}")
         print("=" * 40)
         print("Say 'quit' to exit\n")
 
