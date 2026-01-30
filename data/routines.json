@@ -9,5 +9,27 @@
     ],
     "common_queries": [],
     "recent_topics": []
+  },
+  "guest": {
+    "interaction_times": [
+      {
+        "hour": 12,
+        "day": "weekday",
+        "count": 1
+      },
+      {
+        "hour": 13,
+        "day": "weekday",
+        "count": 4
+      }
+    ],
+    "common_queries": [
+      {
+        "pattern": "news",
+        "time": "afternoon",
+        "count": 1
+      }
+    ],
+    "recent_topics": []
   }
 }

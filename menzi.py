@@ -1,19 +1,21 @@
-"""Menzi Voice Assistant - Main Application."""
+"""Menzi Voice Assistant - Gemini API Version."""
 
 import re
 import sys
+import os
 import queue
 import threading
 import subprocess
 import platform
-import json
+import time
 import numpy as np
 from datetime import datetime
 from typing import Optional, Tuple
 
-import ollama
+import google.generativeai as genai
 
 from config import (
+    GEMINI_API_KEY,
     LLM_MODEL,
     VOICE_EMBEDDINGS_DIR,
     FACE_ENCODINGS_DIR,
@@ -21,7 +23,7 @@ from config import (
     VISION_CONTEXT_EXPIRY_MINUTES,
     ADMIN_USER,
 )
-from core.tools import get_ollama_tools
+from core.tools import get_gemini_tools
 from core.executor import ToolExecutor
 from memory.user_memory import UserMemory
 from memory.user_registry import UserRegistry
@@ -32,7 +34,7 @@ from vision.vlm import VLM
 
 
 class TTS:
-    """Simple text-to-speech."""
+    """Text-to-speech."""
 
     def __init__(self):
         self.system = platform.system()
@@ -58,7 +60,7 @@ class TTS:
                 if text and len(text) > 1:
                     if self.system == "Darwin":
                         self.proc = subprocess.Popen(
-                            ["say", "-r", "180", text],
+                            ["say", "-r", "190", text],
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL
                         )
@@ -91,7 +93,7 @@ class TTS:
 
 
 class STT:
-    """Simple speech-to-text."""
+    """Speech-to-text."""
 
     def __init__(self):
         import speech_recognition as sr
@@ -99,12 +101,11 @@ class STT:
         self.rec = sr.Recognizer()
         self.rec.energy_threshold = 400
         self.rec.dynamic_energy_threshold = False
-        self.rec.pause_threshold = 2.0  # Wait 2 seconds of silence
+        self.rec.pause_threshold = 2.0
         self.rec.phrase_threshold = 0.3
         self.last_audio = None
 
     def listen(self, prompt: str = None) -> Tuple[Optional[str], Optional[np.ndarray]]:
-        """Listen and return (text, audio_array)."""
         if prompt:
             print(f"\n[{prompt}]")
         else:
@@ -112,7 +113,7 @@ class STT:
 
         try:
             with self.sr.Microphone(sample_rate=16000) as source:
-                self.rec.adjust_for_ambient_noise(source, duration=0.5)
+                self.rec.adjust_for_ambient_noise(source, duration=0.3)
                 audio = self.rec.listen(source, timeout=8, phrase_time_limit=15)
 
             print("[Processing...]")
@@ -125,7 +126,7 @@ class STT:
             return text, audio_data
 
         except self.sr.WaitTimeoutError:
-            print("[Timeout - no speech detected]")
+            print("[Timeout]")
             return None, None
         except self.sr.UnknownValueError:
             print("[Could not understand]")
@@ -136,10 +137,35 @@ class STT:
 
 
 class Menzi:
-    """Main assistant."""
+    """Main assistant using Gemini API."""
 
     def __init__(self):
         print("Initializing Menzi...")
+
+        if not GEMINI_API_KEY:
+            raise ValueError("GEMINI_API_KEY not set in .env file")
+
+        # Configure Gemini - single instance
+        genai.configure(api_key=GEMINI_API_KEY)
+
+        # Get tools in Gemini format
+        self.tools = get_gemini_tools()
+
+        # Create model with tools
+        self.model = genai.GenerativeModel(
+            model_name=LLM_MODEL,
+            tools=[self.tools],
+            generation_config=genai.GenerationConfig(
+                temperature=0.7,
+                max_output_tokens=256,  # Keep responses short
+            )
+        )
+
+        self.chat = None
+        self.last_api_call = 0
+        self.min_call_interval = 0.5  # Minimum seconds between API calls
+
+        # Components
         self.tts = TTS()
         self.stt = STT()
         self.camera = Camera()
@@ -153,76 +179,76 @@ class Menzi:
         self.registry = UserRegistry()
         self.routines = RoutineTracker()
 
+        # State
         self.user = None
         self.is_admin = False
-        self.messages = []
         self.executor = None
-        self.tools = get_ollama_tools()
         self.vision_context = None
         self.vision_time = None
+        self.message_count = 0
 
         print("Ready!")
 
+    def _rate_limit(self):
+        """Ensure minimum time between API calls."""
+        elapsed = time.time() - self.last_api_call
+        if elapsed < self.min_call_interval:
+            time.sleep(self.min_call_interval - elapsed)
+        self.last_api_call = time.time()
+
     def _get_system_prompt(self) -> str:
         parts = [
-            f"You are Menzi, a helpful voice assistant. Be concise (1-3 sentences).",
-            f"Current user: {self.user or 'Unknown'}"
+            "You are Menzi, a helpful voice assistant. Keep responses to 1-2 sentences.",
+            f"User: {self.user or 'Unknown'}"
         ]
 
         if self.user:
             memories = self.memory.get_all(self.user)
             if memories:
-                parts.append(f"User facts: {'; '.join(memories[:5])}")
-
-            loc = self.registry.get_location(self.user)
-            if loc:
-                parts.append(f"User location: {loc}")
+                parts.append(f"Known: {'; '.join(memories[:3])}")
 
         if self.vision_context and self.vision_time:
             age = (datetime.now() - self.vision_time).total_seconds() / 60
             if age < VISION_CONTEXT_EXPIRY_MINUTES:
-                parts.append(f"Recent visual: {self.vision_context}")
+                parts.append(f"Saw: {self.vision_context[:100]}")
 
         if self.is_admin:
-            parts.append("User is admin - can use admin_command tool.")
+            parts.append("Admin user.")
 
         return " ".join(parts)
 
-    def _reset_chat(self):
-        self.messages = [{"role": "system", "content": self._get_system_prompt()}]
+    def _start_chat(self):
+        """Start fresh chat session."""
+        self._rate_limit()
+        self.chat = self.model.start_chat(history=[])
+        self.message_count = 0
 
     def _identify(self, audio: np.ndarray) -> Optional[str]:
-        """Try to identify user from voice."""
         user, conf, method = self.identity.resolve(voice_audio=audio)
         if user and conf >= 0.6:
-            print(f"[Identified: {user} ({conf:.0%} via {method})]")
+            print(f"[Identified: {user} ({conf:.0%})]")
             return user
         return None
 
     def _enroll(self, audio: np.ndarray) -> Optional[str]:
-        """Enroll new user."""
-        self.tts.say_sync("I don't recognize you. Please say just your first name.")
+        self.tts.say_sync("I don't recognize you. Say just your first name.")
 
-        name_text, _ = self.stt.listen("Say your name")
+        name_text, _ = self.stt.listen("Your name")
         if not name_text:
             return None
 
-        # Clean the name - take last word to handle "My name is X" or "I'm X"
         words = name_text.strip().split()
         name = words[-1].lower().replace(".", "").replace(",", "")
 
-        # Validate it looks like a name
         if len(name) < 2 or not name.isalpha():
             self.tts.say_sync("Sorry, I didn't catch that.")
             return None
 
         print(f"[Enrolling: {name}]")
-        self.tts.say_sync(f"Hi {name}! Let me remember your voice.")
+        self.tts.say_sync(f"Hi {name}! Saving your voice.")
 
-        # Enroll voice
         self.identity.enroll_user(name, voice_audio=audio)
 
-        # Try face
         frame = self.camera.capture()
         if frame is not None:
             try:
@@ -230,15 +256,13 @@ class Menzi:
             except:
                 pass
 
-        # Register
         is_admin = name.lower() == ADMIN_USER.lower()
         self.registry.create_user(name, admin=is_admin)
 
-        self.tts.say_sync(f"Got it! Nice to meet you, {name}.")
+        self.tts.say_sync(f"Nice to meet you, {name}!")
         return name
 
     def _set_user(self, name: str):
-        """Set current user."""
         self.user = name
         self.is_admin = self.registry.is_admin(name)
         self.executor = ToolExecutor(
@@ -247,97 +271,98 @@ class Menzi:
             camera=self.camera,
             vlm=self.vlm
         )
-        self._reset_chat()
+        self._start_chat()
 
-    def _call_llm(self, user_input: str) -> str:
-        """Send message to LLM and handle tool calls."""
-        self.messages.append({"role": "user", "content": user_input})
+    def _call_gemini(self, user_input: str) -> str:
+        """Send message to Gemini - sequential, rate-limited."""
 
-        # Trim history
-        if len(self.messages) > MAX_MESSAGES:
-            system = self.messages[0]
-            self.messages = [system] + self.messages[-(MAX_MESSAGES-1):]
+        # Check if we need to reset chat
+        self.message_count += 1
+        if self.message_count > MAX_MESSAGES or self.chat is None:
+            self._start_chat()
+
+        # Build context prefix
+        context = self._get_system_prompt()
+        full_input = f"[Context: {context}]\n\nUser: {user_input}"
 
         try:
-            response = ollama.chat(
-                model=LLM_MODEL,
-                messages=self.messages,
-                tools=self.tools
-            )
+            # Rate limit before call
+            self._rate_limit()
+
+            response = self.chat.send_message(full_input)
+
+            # Handle function calls - one at a time, sequentially
+            while response.candidates and response.candidates[0].content.parts:
+                has_function_call = False
+
+                for part in response.candidates[0].content.parts:
+                    if hasattr(part, 'function_call') and part.function_call:
+                        has_function_call = True
+                        fc = part.function_call
+                        name = fc.name
+                        args = dict(fc.args) if fc.args else {}
+
+                        print(f"[Tool: {name}]")
+
+                        # Track routines
+                        if self.user and name in ["get_weather", "get_news"]:
+                            self.routines.record_query(self.user, name.replace("get_", ""))
+
+                        result = self.executor.execute(name, args)
+
+                        if name == "see_camera":
+                            self.vision_context = result
+                            self.vision_time = datetime.now()
+
+                        # Rate limit before next call
+                        self._rate_limit()
+
+                        # Send function result back
+                        response = self.chat.send_message(
+                            genai.protos.Content(
+                                parts=[genai.protos.Part(
+                                    function_response=genai.protos.FunctionResponse(
+                                        name=name,
+                                        response={"result": result}
+                                    )
+                                )]
+                            )
+                        )
+                        break  # Process one function at a time
+
+                if not has_function_call:
+                    break
+
+            # Extract text response
+            if response.candidates and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if hasattr(part, 'text') and part.text:
+                        text = part.text.strip()
+                        # Clean thinking tags
+                        if "</think>" in text:
+                            text = text.split("</think>")[-1].strip()
+                        if self.user:
+                            self.routines.record_interaction(self.user)
+                        return text
+
+            return "I'm not sure how to respond."
+
         except Exception as e:
-            print(f"[LLM Error: {e}]")
-            return "Sorry, I had trouble processing that."
-
-        msg = response.get("message", {})
-
-        # Handle tool calls
-        while msg.get("tool_calls"):
-            self.messages.append(msg)
-
-            for tc in msg["tool_calls"]:
-                func = tc.get("function", {})
-                name = func.get("name", "")
-                args = func.get("arguments", {})
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except:
-                        args = {}
-
-                print(f"[Tool: {name}({args})]")
-
-                # Track routines
-                if self.user and name in ["get_weather", "get_news"]:
-                    self.routines.record_query(self.user, name.replace("get_", ""))
-
-                result = self.executor.execute(name, args)
-
-                # Update vision context
-                if name == "see_camera":
-                    self.vision_context = result
-                    self.vision_time = datetime.now()
-
-                self.messages.append({"role": "tool", "content": result})
-
-            try:
-                response = ollama.chat(
-                    model=LLM_MODEL,
-                    messages=self.messages,
-                    tools=self.tools
-                )
-            except Exception as e:
-                print(f"[LLM Error: {e}]")
-                return "Sorry, there was an error."
-
-            msg = response.get("message", {})
-
-        content = msg.get("content", "")
-
-        # Clean thinking tags
-        if "</think>" in content:
-            content = content.split("</think>")[-1].strip()
-
-        self.messages.append({"role": "assistant", "content": content})
-
-        # Record interaction
-        if self.user:
-            self.routines.record_interaction(self.user)
-
-        return content or "I'm not sure how to respond."
+            print(f"[Gemini Error: {e}]")
+            return "Sorry, I had trouble with that request."
 
     def run(self):
-        """Main loop."""
         print("\n" + "=" * 40)
         print("MENZI VOICE ASSISTANT")
         print("=" * 40)
-        print("Say 'quit' or 'exit' to stop\n")
+        print("Say 'quit' to stop\n")
 
         self.tts.say_sync("Hello! I'm Menzi.")
 
         try:
-            # Initial identification
+            # Identify user
             self.tts.say_sync("Who am I speaking with?")
-            text, audio = self.stt.listen("Say your name or greeting")
+            text, audio = self.stt.listen("Say your name")
 
             if audio is not None:
                 user = self._identify(audio)
@@ -350,11 +375,10 @@ class Menzi:
                         self._set_user(user)
 
             if not self.user:
-                self.user = "guest"
                 self._set_user("guest")
-                self.tts.say_sync("I'll call you guest for now.")
+                self.tts.say_sync("I'll call you guest.")
 
-            # Main conversation loop
+            # Main loop
             while True:
                 text, audio = self.stt.listen()
 
@@ -363,16 +387,14 @@ class Menzi:
 
                 print(f"\nYou: {text}")
 
-                # Exit check
                 if text.lower().strip() in ["quit", "exit", "goodbye", "bye", "stop"]:
                     self.tts.say_sync("Goodbye!")
                     break
 
-                # Get response
-                response = self._call_llm(text)
+                response = self._call_gemini(text)
                 print(f"Menzi: {response}")
 
-                # Speak response
+                # Speak
                 for sentence in re.split(r'(?<=[.!?])\s+', response):
                     if sentence.strip():
                         self.tts.say(sentence.strip())
