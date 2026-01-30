@@ -143,7 +143,8 @@ class STTEngine:
         self.recognizer = sr.Recognizer()
         self.recognizer.energy_threshold = 300
         self.recognizer.dynamic_energy_threshold = True
-        self.recognizer.pause_threshold = 0.8
+        self.recognizer.pause_threshold = 1.5  # Longer pause before cutoff (was 0.8)
+        self.recognizer.non_speaking_duration = 0.5  # Min silence to detect phrase end
         self._last_audio_data = None
 
     def listen(self) -> Tuple[Optional[str], Optional[np.ndarray]]:
