@@ -124,14 +124,10 @@ class TTSEngine:
     def stop(self):
         """Stop the TTS engine."""
         self.running = False
-        # Clear the queue
-        while not self.queue.empty():
-            try:
-                self.queue.get_nowait()
-                self.queue.task_done()
-            except queue.Empty:
-                break
+        # Send sentinel to signal worker to stop
         self.queue.put(None)
+        # Wait for worker thread to finish
+        self.worker.join(timeout=2.0)
         if self.current_proc:
             self.current_proc.terminate()
 
@@ -180,7 +176,7 @@ class STTEngine:
             except sr.WaitTimeoutError:
                 return None, None
             except sr.UnknownValueError:
-                return None, self._last_audio_data
+                return None, audio_data  # Return current audio, not previous
             except sr.RequestError as e:
                 print(f"[STT ERROR] {e}")
                 return None, None
@@ -452,7 +448,7 @@ class Menzi:
         while True:
             # Check for function calls in the response
             function_calls = []
-            if response.candidates and response.candidates[0].content.parts:
+            if response.candidates and len(response.candidates) > 0 and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
                     if hasattr(part, 'function_call') and part.function_call:
                         function_calls.append(part.function_call)
@@ -479,7 +475,7 @@ class Menzi:
                 )
 
         # Extract text from final response
-        if response.candidates and response.candidates[0].content.parts:
+        if response.candidates and len(response.candidates) > 0 and response.candidates[0].content.parts:
             text_parts = []
             for part in response.candidates[0].content.parts:
                 if hasattr(part, 'text') and part.text:
