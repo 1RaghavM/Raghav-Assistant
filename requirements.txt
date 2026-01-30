@@ -1,10 +1,12 @@
 # Core
-google-generativeai
 python-dotenv
 chromadb
 
-# VLM (local - Ollama for Mac dev)
+# LLM & VLM (local - Ollama)
 ollama
+
+# Optional: Cloud LLM (uncomment if using Gemini)
+# google-generativeai
 
 # Audio
 SpeechRecognition

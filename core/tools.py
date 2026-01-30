@@ -1,8 +1,7 @@
-"""Tool definitions for Google Gemini function calling.
+"""Tool definitions for LLM function calling.
 
 This module defines all available tools/functions that Menzi can use
-during conversations. These are formatted for Google Generative AI's
-function calling feature.
+during conversations. Supports both Ollama and Gemini formats.
 """
 
 from typing import List, Dict, Any
@@ -142,6 +141,28 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
         List of tool definition dictionaries with name, description, and parameters.
     """
     return TOOL_DEFINITIONS
+
+
+def get_ollama_tools() -> List[Dict[str, Any]]:
+    """Convert tool definitions to Ollama's tool format.
+
+    Returns tools in the format expected by Ollama's chat API with
+    function calling support.
+
+    Returns:
+        List of tool definitions with 'type': 'function' wrapper.
+    """
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["parameters"]
+            }
+        }
+        for tool in TOOL_DEFINITIONS
+    ]
 
 
 def get_gemini_tools():

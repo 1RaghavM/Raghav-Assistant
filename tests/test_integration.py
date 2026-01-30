@@ -5,8 +5,8 @@ import os
 
 def test_menzi_imports():
     """Test that all modules can be imported."""
-    from config import LLM_MODEL, ADMIN_USER, GEMINI_API_KEY
-    from core.tools import get_gemini_tools
+    from config import LLM_MODEL, ADMIN_USER
+    from core.tools import get_ollama_tools
     from core.executor import ToolExecutor
     from memory.user_memory import UserMemory
     from memory.user_registry import UserRegistry
@@ -20,7 +20,7 @@ def test_menzi_imports():
     from services.news import get_news
 
     assert LLM_MODEL is not None
-    assert len(get_gemini_tools()) == 8
+    assert len(get_ollama_tools()) == 8
 
 def test_full_tool_chain():
     """Test tool executor with all tools."""

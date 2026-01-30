@@ -1,7 +1,7 @@
 """Menzi Voice Assistant - Main Application.
 
 Integrates all modules for a multi-user voice assistant with:
-- Google Gemini API for conversation (cloud LLM)
+- Local Ollama for conversation
 - Local VLM (moondream via Ollama) for vision
 - Voice + Face identity resolution
 - Per-user memories and routines
@@ -15,14 +15,14 @@ import queue
 import threading
 import subprocess
 import platform
+import json
 import numpy as np
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 
-import google.generativeai as genai
+import ollama
 
 from config import (
-    GEMINI_API_KEY,
     LLM_MODEL,
     DATA_DIR,
     VOICE_EMBEDDINGS_DIR,
@@ -32,7 +32,7 @@ from config import (
     VISION_CONTEXT_EXPIRY_MINUTES,
     ADMIN_USER,
 )
-from core.tools import get_gemini_tools, get_tool_names
+from core.tools import get_ollama_tools, get_tool_names
 from core.executor import ToolExecutor
 from memory.user_memory import UserMemory
 from memory.user_registry import UserRegistry
@@ -242,7 +242,7 @@ class Menzi:
     """Main Menzi Voice Assistant application.
 
     Integrates:
-    - Google Gemini for conversation
+    - Local Ollama for conversation
     - Voice + face identity resolution
     - Per-user memories and routines
     - Tool execution
@@ -250,16 +250,9 @@ class Menzi:
     """
 
     def __init__(self):
-        # Validate API key
-        if not GEMINI_API_KEY:
-            raise ValueError(
-                "GEMINI_API_KEY not set. Please set the GEMINI_API_KEY environment variable."
-            )
-
-        # Initialize Gemini
-        genai.configure(api_key=GEMINI_API_KEY)
-        self.tools = get_gemini_tools()
-        self.model = genai.GenerativeModel(LLM_MODEL, tools=[self.tools])
+        # Initialize Ollama tools
+        self.tools = get_ollama_tools()
+        self.model = LLM_MODEL
 
         # Initialize components
         self.tts = TTSEngine()
@@ -278,8 +271,7 @@ class Menzi:
         # Session state
         self.current_user = None
         self.is_admin = False
-        self.conversation = []
-        self.chat = None
+        self.messages = []  # Ollama message history
         self.last_voice_embedding = None
         self.executor = None
 
@@ -332,15 +324,11 @@ class Menzi:
         return "\n".join(parts)
 
     def _start_new_chat(self):
-        """Start a new Gemini chat session."""
+        """Start a new chat session with fresh message history."""
         system_prompt = self._build_system_prompt()
-        self.chat = self.model.start_chat(
-            history=[
-                {"role": "user", "parts": [f"System context: {system_prompt}"]},
-                {"role": "model", "parts": ["Understood. I'm ready to help."]}
-            ]
-        )
-        self.conversation = []
+        self.messages = [
+            {"role": "system", "content": system_prompt}
+        ]
 
     def _identify_user(self, audio: np.ndarray) -> Tuple[Optional[str], float, str]:
         """Identify user from voice (with optional face backup)."""
@@ -425,64 +413,61 @@ class Menzi:
             vlm=self.vlm
         )
 
-    def _execute_function_call(self, function_call) -> str:
-        """Execute a Gemini function call and return result."""
-        name = function_call.name
-        args = dict(function_call.args)
-
-        print(f"[TOOL] {name}: {args}")
-
-        # Record routine patterns
-        if self.current_user:
-            if name == "get_weather":
-                self.routines.record_query(self.current_user, "weather")
-            elif name == "get_news":
-                self.routines.record_query(self.current_user, "news")
-
-        result = self.executor.execute(name, args)
-        return result
-
     def _process_response(self, response) -> str:
-        """Process Gemini response, handling any function calls."""
-        # Check if there are function calls
-        while True:
-            # Check for function calls in the response
-            function_calls = []
-            if response.candidates and len(response.candidates) > 0 and response.candidates[0].content.parts:
-                for part in response.candidates[0].content.parts:
-                    if hasattr(part, 'function_call') and part.function_call:
-                        function_calls.append(part.function_call)
+        """Process Ollama response, handling any tool calls."""
+        message = response.get("message", {})
 
-            if not function_calls:
-                break
+        # Handle tool calls if present
+        while message.get("tool_calls"):
+            # Add the assistant's message with tool calls to history
+            self.messages.append(message)
 
-            # Execute each function call and send results back
-            for fc in function_calls:
-                result = self._execute_function_call(fc)
+            # Execute each tool call
+            for tool_call in message["tool_calls"]:
+                func = tool_call.get("function", {})
+                name = func.get("name", "")
+                args = func.get("arguments", {})
 
-                # Send the function response back to Gemini
-                response = self.chat.send_message(
-                    genai.protos.Content(
-                        parts=[
-                            genai.protos.Part(
-                                function_response=genai.protos.FunctionResponse(
-                                    name=fc.name,
-                                    response={"result": result}
-                                )
-                            )
-                        ]
-                    )
-                )
+                # If args is a string, parse it as JSON
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {}
 
-        # Extract text from final response
-        if response.candidates and len(response.candidates) > 0 and response.candidates[0].content.parts:
-            text_parts = []
-            for part in response.candidates[0].content.parts:
-                if hasattr(part, 'text') and part.text:
-                    text_parts.append(part.text)
-            return " ".join(text_parts)
+                print(f"[TOOL] {name}: {args}")
 
-        return "I'm sorry, I couldn't generate a response."
+                # Record routine patterns
+                if self.current_user:
+                    if name == "get_weather":
+                        self.routines.record_query(self.current_user, "weather")
+                    elif name == "get_news":
+                        self.routines.record_query(self.current_user, "news")
+
+                result = self.executor.execute(name, args)
+
+                # Add tool response to messages
+                self.messages.append({
+                    "role": "tool",
+                    "content": result
+                })
+
+            # Get next response from Ollama
+            response = ollama.chat(
+                model=self.model,
+                messages=self.messages,
+                tools=self.tools
+            )
+            message = response.get("message", {})
+
+        # Extract text content from final response
+        content = message.get("content", "")
+
+        # Remove thinking tags if present (some models use these)
+        if "</think>" in content:
+            content = content.split("</think>")[-1].strip()
+
+        return content if content else "I'm sorry, I couldn't generate a response."
 
     def _speak_response(self, text: str):
         """Speak response, breaking into sentences for smoother TTS."""
@@ -497,25 +482,31 @@ class Menzi:
         self.tts.wait()
 
     def _chat(self, user_input: str) -> str:
-        """Send message to Gemini and get response."""
+        """Send message to Ollama and get response."""
         # Record interaction time
         if self.current_user:
             self.routines.record_interaction(self.current_user)
 
         # Keep conversation within limits
-        if len(self.conversation) >= MAX_MESSAGES:
+        if len(self.messages) >= MAX_MESSAGES:
             # Rebuild chat with fresh system prompt
             self._start_new_chat()
 
-        # Send message
-        response = self.chat.send_message(user_input)
+        # Add user message to history
+        self.messages.append({"role": "user", "content": user_input})
 
-        # Process response (handle function calls)
+        # Send to Ollama
+        response = ollama.chat(
+            model=self.model,
+            messages=self.messages,
+            tools=self.tools
+        )
+
+        # Process response (handle tool calls)
         response_text = self._process_response(response)
 
-        # Store in conversation history
-        self.conversation.append({"role": "user", "content": user_input})
-        self.conversation.append({"role": "assistant", "content": response_text})
+        # Add assistant response to history
+        self.messages.append({"role": "assistant", "content": response_text})
 
         # Increment vision context message count
         self.vision_context.increment_messages()
@@ -587,8 +578,8 @@ class Menzi:
                 if self.executor is None:
                     self._init_executor()
 
-                # Initialize chat if needed
-                if self.chat is None:
+                # Initialize messages if needed
+                if not self.messages:
                     self._start_new_chat()
 
                 # Get response from Gemini

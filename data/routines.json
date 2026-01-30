@@ -1,1 +1,13 @@
-{}
+{
+  "my": {
+    "interaction_times": [
+      {
+        "hour": 12,
+        "day": "weekday",
+        "count": 1
+      }
+    ],
+    "common_queries": [],
+    "recent_topics": []
+  }
+}

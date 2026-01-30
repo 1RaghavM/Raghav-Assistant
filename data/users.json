@@ -3,5 +3,10 @@
     "admin": true,
     "created_at": "2026-01-29T00:00:00",
     "default_location": "San Francisco"
+  },
+  "my": {
+    "admin": false,
+    "created_at": "2026-01-30T12:32:16.036500",
+    "default_location": null
   }
 }
