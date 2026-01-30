@@ -4,3 +4,17 @@ mem0_db/
 .env
 user_memories.json
 Does it make sense giving my model access to a web.md
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# User data files
+data/face_encodings/*.pkl
+data/voice_embeddings/*.pkl
+data/memories/*.json
+
+# Keep directory structure
+!data/memories/.gitkeep
+!data/face_encodings/.gitkeep
+!data/voice_embeddings/.gitkeep
