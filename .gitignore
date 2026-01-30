@@ -3,3 +3,4 @@ mem0_db/
 .claude
 .env
 user_memories.json
+Does it make sense giving my model access to a web.md
