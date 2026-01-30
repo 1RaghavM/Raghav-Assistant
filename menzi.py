@@ -99,10 +99,11 @@ class STT:
         import speech_recognition as sr
         self.sr = sr
         self.rec = sr.Recognizer()
-        self.rec.energy_threshold = 400
-        self.rec.dynamic_energy_threshold = False
-        self.rec.pause_threshold = 2.0
-        self.rec.phrase_threshold = 0.3
+        self.rec.energy_threshold = 200  # Lower = more sensitive
+        self.rec.dynamic_energy_threshold = True  # Auto-adjust
+        self.rec.pause_threshold = 1.5  # Seconds of silence to end phrase
+        self.rec.phrase_threshold = 0.2
+        self.rec.non_speaking_duration = 0.3
         self.last_audio = None
 
     def listen(self, prompt: str = None) -> Tuple[Optional[str], Optional[np.ndarray]]:
@@ -113,8 +114,10 @@ class STT:
 
         try:
             with self.sr.Microphone(sample_rate=16000) as source:
-                self.rec.adjust_for_ambient_noise(source, duration=0.3)
-                audio = self.rec.listen(source, timeout=8, phrase_time_limit=15)
+                # Brief ambient noise adjustment
+                self.rec.adjust_for_ambient_noise(source, duration=0.5)
+                print(f"[Energy threshold: {self.rec.energy_threshold:.0f}]")
+                audio = self.rec.listen(source, timeout=15, phrase_time_limit=30)
 
             print("[Processing...]")
             audio_data = np.frombuffer(
