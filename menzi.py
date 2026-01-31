@@ -25,6 +25,7 @@ from memory.routines import RoutineTracker
 from identity.resolver import IdentityResolver
 from vision.camera import Camera
 from vision.vlm import VLM
+from vision.face_tracker import FaceTracker
 from audio.stt import VoiceInput
 
 # Try streaming TTS first, fall back to regular
@@ -78,6 +79,8 @@ class Menzi:
         self.routines = RoutineTracker()
         self.camera = Camera()
         self.vlm = VLM()
+        self.face_tracker = FaceTracker(self.camera, self.identity.face_id)
+        self.face_tracker.start()
 
         # State
         self.user = None
@@ -89,6 +92,10 @@ class Menzi:
 
     def _system_prompt(self) -> str:
         parts = ["You are Menzi, a helpful voice assistant. Be conversational and brief (1-2 sentences)."]
+
+        # Add face tracking identity context
+        identity_ctx = self.face_tracker.get_identity_summary()
+        parts.append(identity_ctx)
 
         if self.user and self.user != "unknown":
             parts.append(f"You're speaking with {self.user}.")
@@ -126,6 +133,7 @@ class Menzi:
             is_admin=self.is_admin,
             camera=self.camera,
             vlm=self.vlm,
+            face_tracker=self.face_tracker,
             on_user_change=self._on_user_change
         )
         self._reset_messages()
@@ -355,6 +363,7 @@ class Menzi:
                     identified = self.identify(audio)
                     if identified:
                         self._set_user(identified)
+                        self.face_tracker.set_speaker(identified, 0.75)  # Voice ID confidence
 
                 print(f"\nYou: {text}")
 
@@ -370,6 +379,7 @@ class Menzi:
             print("\nInterrupted")
         finally:
             self.camera.release()
+            self.face_tracker.stop()
 
 
 if __name__ == "__main__":
