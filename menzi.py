@@ -301,10 +301,12 @@ class Menzi:
             return "Sorry, something went wrong."
 
     def identify(self, audio: np.ndarray) -> Optional[str]:
-        """Identify user from voice."""
-        user, conf, _ = self.identity.resolve(voice_audio=audio)
+        """Identify user from voice and update face tracker."""
+        user, conf, method = self.identity.resolve(voice_audio=audio)
         if user and conf >= 0.6:
-            print(f"Identified: {user} ({conf:.0%})")
+            print(f"Identified: {user} ({conf:.0%} via {method})")
+            # Update face tracker with speaker info
+            self.face_tracker.set_speaker(user, conf)
             return user
         return None
 
