@@ -20,6 +20,7 @@ cerebras-cloud-sdk
 face_recognition
 resemblyzer
 numpy
+mediapipe  # Fast face detection (BlazeFace)
 
 # Vision
 opencv-python
