@@ -48,6 +48,7 @@ class ToolExecutor:
         data_dir: str = None,
         camera=None,
         vlm=None,
+        face_tracker=None,
         on_user_change=None  # Callback when user is set/changed
     ):
         self.current_user = current_user
@@ -78,6 +79,7 @@ class ToolExecutor:
 
         self.camera = camera
         self.vlm = vlm
+        self.face_tracker = face_tracker
 
     def execute(self, tool_name: str, arguments: Dict[str, Any]) -> str:
         """Execute a tool and return the result as a string."""
@@ -198,7 +200,17 @@ class ToolExecutor:
             return "Could not capture image from camera."
 
         try:
-            result = self.vlm.analyze(frame, query)
+            # Enhance query with face annotations if available
+            if self.face_tracker:
+                face_context = self.face_tracker.get_faces_for_vlm()
+                if face_context:
+                    enhanced_query = f"{face_context}\n\nDescribe what each person is doing, with emphasis on the speaker. {query}"
+                else:
+                    enhanced_query = query
+            else:
+                enhanced_query = query
+
+            result = self.vlm.analyze(frame, enhanced_query)
             return result
         except Exception as e:
             return f"Vision error: {str(e)}"
