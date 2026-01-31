@@ -35,6 +35,11 @@ FACE_MATCH_THRESHOLD = 0.6
 VISION_CONTEXT_EXPIRY_MESSAGES = 10
 VISION_CONTEXT_EXPIRY_MINUTES = 5
 
+# Face tracking
+FACE_TRACK_INTERVAL_MS = 200      # Background detection interval
+FACE_STALE_TIMEOUT_S = 2.0        # Remove faces not seen for this long
+FACE_REIDENTIFY_INTERVAL_S = 5.0  # Re-run recognition every N seconds
+
 # Conversation
 MAX_MESSAGES = 16
 
