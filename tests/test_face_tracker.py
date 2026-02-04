@@ -4,8 +4,7 @@ from unittest.mock import Mock, patch
 
 def test_face_tracker_init():
     """FaceTracker initializes with camera and face_id."""
-    with patch('vision.face_tracker.mp') as mock_mp:
-        mock_mp.solutions.face_detection.FaceDetection.return_value = Mock()
+    with patch('vision.face_tracker._MP_FACE_DETECTION', Mock()):
         from vision.face_tracker import FaceTracker
 
         mock_camera = Mock()
@@ -18,8 +17,7 @@ def test_face_tracker_init():
 
 def test_get_current_faces_empty():
     """get_current_faces returns empty list when no faces detected."""
-    with patch('vision.face_tracker.mp') as mock_mp:
-        mock_mp.solutions.face_detection.FaceDetection.return_value = Mock()
+    with patch('vision.face_tracker._MP_FACE_DETECTION', Mock()):
         from vision.face_tracker import FaceTracker
 
         tracker = FaceTracker(Mock(), Mock())
@@ -29,8 +27,7 @@ def test_get_current_faces_empty():
 
 def test_set_speaker():
     """set_speaker updates speaker_id and confidence."""
-    with patch('vision.face_tracker.mp') as mock_mp:
-        mock_mp.solutions.face_detection.FaceDetection.return_value = Mock()
+    with patch('vision.face_tracker._MP_FACE_DETECTION', Mock()):
         from vision.face_tracker import FaceTracker
 
         tracker = FaceTracker(Mock(), Mock())
@@ -41,8 +38,7 @@ def test_set_speaker():
 
 def test_get_identity_summary_no_faces():
     """get_identity_summary returns appropriate message when no faces."""
-    with patch('vision.face_tracker.mp') as mock_mp:
-        mock_mp.solutions.face_detection.FaceDetection.return_value = Mock()
+    with patch('vision.face_tracker._MP_FACE_DETECTION', Mock()):
         from vision.face_tracker import FaceTracker
 
         tracker = FaceTracker(Mock(), Mock())

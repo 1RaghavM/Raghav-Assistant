@@ -5,6 +5,16 @@
         "hour": 12,
         "day": "weekday",
         "count": 2
+      },
+      {
+        "hour": 17,
+        "day": "weekday",
+        "count": 2
+      },
+      {
+        "hour": 18,
+        "day": "weekday",
+        "count": 3
       }
     ],
     "common_queries": [],
@@ -21,6 +31,11 @@
         "hour": 13,
         "day": "weekday",
         "count": 4
+      },
+      {
+        "hour": 17,
+        "day": "weekday",
+        "count": 9
       }
     ],
     "common_queries": [
@@ -38,6 +53,11 @@
         "hour": 14,
         "day": "weekday",
         "count": 5
+      },
+      {
+        "hour": 13,
+        "day": "weekend",
+        "count": 2
       }
     ],
     "common_queries": [],

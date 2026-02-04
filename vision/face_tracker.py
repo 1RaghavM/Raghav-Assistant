@@ -12,9 +12,8 @@ Background thread that:
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
-import mediapipe as mp
 import numpy as np
 
 from config import (
@@ -22,6 +21,21 @@ from config import (
     FACE_STALE_TIMEOUT_S,
     FACE_REIDENTIFY_INTERVAL_S,
 )
+
+# Prefer MediaPipe BlazeFace; fall back to OpenCV Haar if mediapipe.solutions missing (e.g. mediapipe-silicon on Mac)
+_MP_FACE_DETECTION = None
+try:
+    from mediapipe.solutions.face_detection import FaceDetection as MPFaceDetection
+    _MP_FACE_DETECTION = MPFaceDetection
+except (ImportError, AttributeError):
+    pass
+
+_CV2_AVAILABLE = False
+try:
+    import cv2
+    _CV2_AVAILABLE = True
+except ImportError:
+    pass
 
 
 @dataclass
@@ -60,11 +74,26 @@ class FaceTracker:
         self.face_id = face_id
         self.interval_ms = interval_ms if interval_ms is not None else FACE_TRACK_INTERVAL_MS
 
-        # MediaPipe face detection
-        self._detector = mp.solutions.face_detection.FaceDetection(
-            model_selection=0,  # 0 for short-range (< 2m), 1 for full-range
-            min_detection_confidence=0.5
-        )
+        # Face detection: MediaPipe BlazeFace or OpenCV Haar fallback
+        self._mp_detector = None
+        self._cv_detector = None
+        if _MP_FACE_DETECTION is not None:
+            self._mp_detector = _MP_FACE_DETECTION(
+                model_selection=0,
+                min_detection_confidence=0.5,
+            )
+        elif _CV2_AVAILABLE:
+            path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            self._cv_detector = cv2.CascadeClassifier(path)
+            if self._cv_detector.empty():
+                self._cv_detector = None
+            else:
+                print("[FaceTracker] Using OpenCV Haar fallback (MediaPipe unavailable)")
+        if self._mp_detector is None and self._cv_detector is None:
+            raise RuntimeError(
+                "No face detector available. Install mediapipe (pip install mediapipe). "
+                "On Mac, avoid mediapipe-silicon; use: pip uninstall mediapipe-silicon; pip install mediapipe"
+            )
 
         # Thread management
         self._running = False
@@ -118,17 +147,31 @@ class FaceTracker:
         if frame is None:
             return
 
-        # Convert BGR to RGB for MediaPipe
-        rgb_frame = frame[:, :, ::-1]
-
-        # Detect faces with MediaPipe BlazeFace
-        results = self._detector.process(rgb_frame)
+        # Detect faces: MediaPipe or OpenCV fallback
+        if self._mp_detector is not None:
+            rgb_frame = frame[:, :, ::-1]
+            results = self._mp_detector.process(rgb_frame)
+            detections = results.detections if results.detections else []
+        else:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            h, w = gray.shape[:2]
+            rects = self._cv_detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+            # Normalize to (xmin, ymin, width, height) in [0,1]
+            detections = []
+            for (x, y, rw, rh) in rects:
+                xmin = x / w
+                ymin = y / h
+                nw = rw / w
+                nh = rh / h
+                rel = type("BBox", (), {"xmin": xmin, "ymin": ymin, "width": nw, "height": nh})()
+                det = type("Det", (), {"location_data": type("Loc", (), {"relative_bounding_box": rel})()})()
+                detections.append(det)
 
         current_time = time.time()
         seen_keys = set()
 
-        if results.detections:
-            for detection in results.detections:
+        if detections:
+            for detection in detections:
                 bbox = detection.location_data.relative_bounding_box
                 bbox_tuple = (bbox.xmin, bbox.ymin, bbox.width, bbox.height)
                 pos_key = self._position_key(bbox_tuple)

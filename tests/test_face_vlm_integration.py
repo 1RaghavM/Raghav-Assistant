@@ -6,15 +6,12 @@ from unittest.mock import Mock, patch, MagicMock
 
 def test_identity_summary_flows_to_system_prompt():
     """Verify face tracker identity flows to LLM system prompt."""
-    with patch('vision.face_tracker.mp') as mock_mp, \
+    with patch('vision.face_tracker._MP_FACE_DETECTION', Mock()), \
          patch('menzi.VoiceInput'), \
          patch('menzi.Cerebras'), \
          patch('menzi.Camera'), \
          patch('menzi.VLM'), \
          patch('menzi.CEREBRAS_API_KEY', 'test-key'):
-
-        # Setup mock MediaPipe
-        mock_mp.solutions.face_detection.FaceDetection.return_value = Mock()
 
         from menzi import Menzi
 
@@ -64,14 +61,12 @@ def test_see_camera_includes_face_context():
 
 def test_speaker_set_on_voice_identification():
     """Verify voice identification updates face tracker speaker."""
-    with patch('vision.face_tracker.mp') as mock_mp, \
+    with patch('vision.face_tracker._MP_FACE_DETECTION', Mock()), \
          patch('menzi.VoiceInput'), \
          patch('menzi.Cerebras'), \
          patch('menzi.Camera'), \
          patch('menzi.VLM'), \
          patch('menzi.CEREBRAS_API_KEY', 'test-key'):
-
-        mock_mp.solutions.face_detection.FaceDetection.return_value = Mock()
 
         from menzi import Menzi
 
